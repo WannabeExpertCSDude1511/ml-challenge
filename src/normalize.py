@@ -3,130 +3,106 @@ import unicodedata
 from functools import lru_cache
 
 from indicnlp.normalize.indic_normalize import IndicNormalizerFactory
+from indic_transliteration import sanscript
+from indic_transliteration.sanscript import transliterate
+
+
+# Bump whenever normalization output changes; it invalidates the disk cache.
+NORMALIZE_VERSION = 2
 
 
 # =========================================================
-# Indic script detection
+# Indic scripts
+# =========================================================
+#
+# lang code: (Unicode block start, sanscript scheme,
+#             drop word-final inherent "a")
+#
+# All nine blocks share the same internal layout, so the
+# consonant / sign offsets below work for every script.
 # =========================================================
 
-INDIC_SCRIPTS = [
-    (0x0900, 0x097F, "hi"),   # Devanagari / Hindi
-    (0x0980, 0x09FF, "bn"),   # Bengali
-    (0x0A00, 0x0A7F, "pa"),   # Gurmukhi / Punjabi
-    (0x0A80, 0x0AFF, "gu"),   # Gujarati
-    (0x0B00, 0x0B7F, "or"),   # Odia
-    (0x0B80, 0x0BFF, "ta"),   # Tamil
-    (0x0C00, 0x0C7F, "te"),   # Telugu
-    (0x0C80, 0x0CFF, "kn"),   # Kannada
-    (0x0D00, 0x0D7F, "ml"),   # Malayalam
-]
-
-
-# =========================================================
-# Indic NLP normalizer
-# =========================================================
+INDIC_SCRIPTS = {
+    "hi": (0x0900, sanscript.DEVANAGARI, True),
+    "bn": (0x0980, sanscript.BENGALI, True),
+    "pa": (0x0A00, sanscript.GURMUKHI, True),
+    "gu": (0x0A80, sanscript.GUJARATI, True),
+    "or": (0x0B00, sanscript.ORIYA, False),
+    "ta": (0x0B80, sanscript.TAMIL, False),
+    "te": (0x0C00, sanscript.TELUGU, False),
+    "kn": (0x0C80, sanscript.KANNADA, False),
+    "ml": (0x0D00, sanscript.MALAYALAM, False),
+}
 
 INDIC_NORMALIZER_FACTORY = IndicNormalizerFactory()
 
 
-# Bump whenever normalization output changes; it invalidates the disk cache.
-NORMALIZE_VERSION = 1
+def _block(base, lo, hi):
+    return f"{chr(base + lo)}-{chr(base + hi)}"
 
 
-# =========================================================
-# Devanagari transliteration
-# =========================================================
-#
-# Lightweight rule-based Hindi -> Roman transliteration.
-#
-# This is deliberately kept dependency-free.
-# =========================================================
+# Word-final consonant with no vowel sign / virama after it:
+# add a virama so it transliterates without the inherent "a"
+# (राम -> ram, not rama).
+FINAL_CONSONANT = {}
 
-DEVANAGARI_VOWELS = {
-    "अ": "a",
-    "आ": "aa",
-    "इ": "i",
-    "ई": "ee",
-    "उ": "u",
-    "ऊ": "oo",
-    "ऋ": "ri",
-    "ए": "e",
-    "ऐ": "ai",
-    "ओ": "o",
-    "औ": "au",
+for _lang, (_base, _, _drop) in INDIC_SCRIPTS.items():
+    if _drop:
+        _consonant = f"[{_block(_base, 0x15, 0x39)}{_block(_base, 0x58, 0x5F)}]{chr(_base + 0x3C)}?"
+        _signs = (
+            f"{_block(_base, 0x00, 0x03)}{_block(_base, 0x3C, 0x4D)}"
+            f"{_block(_base, 0x55, 0x57)}{_block(_base, 0x62, 0x63)}"
+        )
+        FINAL_CONSONANT[_lang] = (
+            re.compile(rf"({_consonant})(?![{_signs}])(?=\W|$)"),
+            chr(_base + 0x4D),
+        )
+
+
+# Signs the transliteration library does not map.
+SCRIPT_FIXES = {
+    # Devanagari candra vowels (ऑ, ॉ, ॅ): treat as o / e
+    "hi": str.maketrans({"ऑ": "ओ", "ॉ": "ो", "ऍ": "ए", "ॅ": "े"}),
+    # Malayalam chillu letters -> consonant + virama
+    "ml": str.maketrans({
+        "ൺ": "ണ്",
+        "ൻ": "ന്",
+        "ർ": "ര്",
+        "ൽ": "ല്",
+        "ൾ": "ള്",
+        "ൿ": "ക്",
+    }),
 }
 
 
-DEVANAGARI_MATRAS = {
-    "ा": "aa",
-    "ि": "i",
-    "ी": "ee",
-    "ु": "u",
-    "ू": "oo",
-    "ृ": "ri",
-    "े": "e",
-    "ै": "ai",
-    "ो": "o",
-    "ौ": "au",
+# ITRANS output -> plain lowercase Latin.
+ITRANS_FIXES = [
+    (re.compile(r"M(?=[pbm])"), "m"),   # anusvara before labials
+    ("M", "n"),                          # other anusvara
+    (".N", "n"),                         # candrabindu
+    ("~N", "n"),
+    ("~n", "n"),
+    ("R^I", "ri"),
+    ("R^i", "ri"),
+    ("L^I", "li"),
+    ("L^i", "li"),
+    ("Ch", "chh"),
+    ("H", "h"),
+    (".a", ""),
+    (".D", "d"),
+    ("^", ""),
+    ("~", ""),
+    (".", ""),
+]
+
+
+# Script-specific spelling fixes after lowercasing.
+LATIN_FIXES = {
+    # The Tamil scheme renders unvoiced stops as voiced aspirates.
+    "ta": [("bh", "p"), ("dh", "t"), ("gh", "k"), ("jh", "s")],
+    # Malayalam ṟṟ is pronounced "tt".
+    "ml": [("rr", "tt")],
 }
-
-
-DEVANAGARI_CONSONANTS = {
-    "क": "k",
-    "ख": "kh",
-    "ग": "g",
-    "घ": "gh",
-    "ङ": "ng",
-
-    "च": "ch",
-    "छ": "chh",
-    "ज": "j",
-    "झ": "jh",
-    "ञ": "ny",
-
-    "ट": "t",
-    "ठ": "th",
-    "ड": "d",
-    "ढ": "dh",
-    "ण": "n",
-
-    "त": "t",
-    "थ": "th",
-    "द": "d",
-    "ध": "dh",
-    "न": "n",
-
-    "प": "p",
-    "फ": "ph",
-    "ब": "b",
-    "भ": "bh",
-    "म": "m",
-
-    "य": "y",
-    "र": "r",
-    "ल": "l",
-    "व": "v",
-
-    "श": "sh",
-    "ष": "sh",
-    "स": "s",
-    "ह": "h",
-
-    "ळ": "l",
-}
-
-
-DEVANAGARI_SPECIAL = {
-    "ं": "n",
-    "ँ": "n",
-    "ः": "h",
-    "़": "",
-    "ऽ": "",
-}
-
-
-# Virama / halant
-DEVANAGARI_VIRAMA = "्"
 
 
 # =========================================================
@@ -145,9 +121,10 @@ def detect_indic_script(text):
     for char in text:
         code = ord(char)
 
-        for start, end, lang_code in INDIC_SCRIPTS:
-            if start <= code <= end:
-                return lang_code
+        if 0x0900 <= code <= 0x0D7F:
+            for lang_code, (start, _, _) in INDIC_SCRIPTS.items():
+                if start <= code < start + 0x80:
+                    return lang_code
 
     return None
 
@@ -175,216 +152,148 @@ def normalize_indic_text(value, lang_code):
 
 
 # =========================================================
-# Devanagari -> Roman
-# =========================================================
-
-def transliterate_devanagari(text):
-    """
-    Convert Devanagari text into readable Roman text.
-
-    Example:
-
-        राम
-        ->
-        raam
-
-        मार्केटिंग
-        ->
-        maarketing
-
-        प्राइवेट
-        ->
-        praivet
-    """
-
-    output = []
-    i = 0
-
-    while i < len(text):
-
-        char = text[i]
-
-        # -------------------------------------------------
-        # Independent vowels
-        # -------------------------------------------------
-
-        if char in DEVANAGARI_VOWELS:
-            output.append(DEVANAGARI_VOWELS[char])
-            i += 1
-            continue
-
-        # -------------------------------------------------
-        # Consonants
-        # -------------------------------------------------
-
-        if char in DEVANAGARI_CONSONANTS:
-
-            consonant = DEVANAGARI_CONSONANTS[char]
-
-            # Look ahead.
-            next_char = text[i + 1] if i + 1 < len(text) else ""
-
-            # -------------------------------------------------
-            # Explicit halant
-            # -------------------------------------------------
-
-            if next_char == DEVANAGARI_VIRAMA:
-                output.append(consonant)
-
-                i += 2
-                continue
-
-            # -------------------------------------------------
-            # Matra
-            # -------------------------------------------------
-
-            if next_char in DEVANAGARI_MATRAS:
-                output.append(
-                    consonant + DEVANAGARI_MATRAS[next_char]
-                )
-
-                i += 2
-                continue
-
-            # -------------------------------------------------
-            # No matra:
-            #
-            # Devanagari consonants have an inherent "a".
-            # -------------------------------------------------
-
-            output.append(
-                consonant + "a"
-            )
-
-            i += 1
-            continue
-
-        # -------------------------------------------------
-        # Special marks
-        # -------------------------------------------------
-
-        if char in DEVANAGARI_SPECIAL:
-            output.append(
-                DEVANAGARI_SPECIAL[char]
-            )
-
-            i += 1
-            continue
-
-        # -------------------------------------------------
-        # Nukta
-        # -------------------------------------------------
-
-        if char == "़":
-            i += 1
-            continue
-
-        # -------------------------------------------------
-        # ASCII / punctuation / whitespace
-        # -------------------------------------------------
-
-        output.append(char)
-        i += 1
-
-    return "".join(output)
-
-
-# =========================================================
-# Post-process Hindi transliteration
-# =========================================================
-
-def clean_hindi_transliteration(text):
-    """
-    Clean common artifacts produced by rule-based
-    Devanagari transliteration.
-    """
-
-    # Remove duplicated spaces
-    text = re.sub(
-        r"\s+",
-        " ",
-        text,
-    ).strip()
-
-    # -----------------------------------------------------
-    # Common Hindi spelling adjustments
-    # -----------------------------------------------------
-
-    replacements = {
-        "aa": "a",
-        "ee": "i",
-        "oo": "u",
-    }
-
-    # We intentionally do NOT blindly replace these globally,
-    # because words such as "maal" and "school" can be affected.
-    #
-    # Instead, only collapse some common awkward sequences.
-
-    text = re.sub(
-        r"\bmaarketing\b",
-        "marketing",
-        text,
-        flags=re.IGNORECASE,
-    )
-
-    text = re.sub(
-        r"\bpraivet\b",
-        "private",
-        text,
-        flags=re.IGNORECASE,
-    )
-
-    text = re.sub(
-        r"\blimited\b",
-        "limited",
-        text,
-        flags=re.IGNORECASE,
-    )
-
-    return text
-
-
-# =========================================================
 # Indic -> Roman
 # =========================================================
 
 def transliterate_indic_text(value, lang_code):
     """
-    Convert supported Indic text into Roman text.
+    Convert Indic text into lowercase Roman text with the
+    indic-transliteration library (ITRANS scheme).
 
-    At the moment, Devanagari/Hindi has the dedicated
-    lightweight transliteration implementation.
+    Example:
 
-    Other scripts are left unchanged rather than producing
-    incorrect transliterations.
+        राम मार्केटिंग प्राइवेट लिमिटेड
+        ->
+        ram marketing praivet limited
     """
 
-    if lang_code == "hi":
-        return transliterate_devanagari(value)
+    _, scheme, drop_final_a = INDIC_SCRIPTS[lang_code]
+
+    if lang_code in SCRIPT_FIXES:
+        value = value.translate(SCRIPT_FIXES[lang_code])
+
+    if drop_final_a:
+        pattern, virama = FINAL_CONSONANT[lang_code]
+        value = pattern.sub(lambda m: m.group(1) + virama, value)
+
+    value = transliterate(value, scheme, sanscript.ITRANS)
+
+    for old, new in ITRANS_FIXES:
+        if isinstance(old, str):
+            value = value.replace(old, new)
+        else:
+            value = old.sub(new, value)
+
+    value = value.lower()
+
+    for old, new in LATIN_FIXES.get(lang_code, ()):
+        value = value.replace(old, new)
 
     return value
 
 
 # =========================================================
-# Legal / business suffixes
+# Canonical tokens
+# =========================================================
+#
+# Variants map to one canonical token, so "Pvt" / "Private"
+# / transliterated "praivet" all compare equal. Collisions
+# such as street / saint -> "st" are harmless for matching.
 # =========================================================
 
-LEGAL_SUFFIXES = {
-    "limited",
-    "ltd",
-    "llp",
-    "llc",
-    "inc",
-    "incorporated",
-    "corp",
-    "corporation",
-    "company",
-    "co",
-    "private",
-    "pvt",
-    "plc",
+NAME_CANONICAL = {
+    # private
+    "private": "pvt", "pvt": "pvt", "praivet": "pvt", "praibhet": "pvt",
+    "piraivet": "pvt", "praivatt": "pvt",
+    # limited
+    "limited": "ltd", "ltd": "ltd", "limatid": "ltd", "limitet": "ltd",
+    "limittad": "ltd",
+    # llp
+    "llp": "llp", "elaelapi": "llp", "elelpi": "llp", "ailaailapi": "llp",
+    # other legal forms
+    "incorporated": "inc", "inc": "inc",
+    "corporation": "corp", "corp": "corp",
+    "company": "co", "co": "co", "cie": "co", "kampani": "co",
+    # common words
+    "international": "intl", "intl": "intl",
+    "centre": "center", "ctr": "center",
+    "services": "service", "svcs": "service", "svc": "service",
+    "brothers": "bros",
+    "associates": "assoc",
+    "manufacturing": "mfg",
+    "management": "mgmt",
 }
+
+# Abbreviations only trusted when the name was written in an Indic script
+# (प्रा. लि. -> pra li); "li" is also a common surname in Latin names.
+INDIC_NAME_CANONICAL = {"pra": "pvt", "li": "ltd"}
+
+LEGAL_SUFFIXES = {
+    "pvt", "ltd", "llp", "llc", "inc", "corp", "co", "plc",
+    "lp", "pllc", "pc", "opc",
+    "sarl", "sas", "sasu", "sa", "eurl", "sci", "snc",
+    "the",
+}
+
+ADDRESS_CANONICAL = {
+    "street": "st", "str": "st", "st": "st", "saint": "st",
+    "road": "rd", "rd": "rd",
+    "avenue": "ave", "ave": "ave", "av": "ave",
+    "boulevard": "blvd", "blvd": "blvd", "bd": "blvd", "boul": "blvd",
+    "drive": "dr", "dr": "dr",
+    "lane": "ln", "ln": "ln",
+    "court": "ct", "ct": "ct",
+    "place": "pl", "pl": "pl",
+    "highway": "hwy", "hwy": "hwy",
+    "parkway": "pkwy", "pkwy": "pkwy",
+    "square": "sq", "sq": "sq",
+    "circle": "cir", "cir": "cir",
+    "terrace": "ter", "ter": "ter",
+    "trail": "trl", "trl": "trl",
+    "suite": "ste", "ste": "ste",
+    "apartment": "apt", "apt": "apt",
+    "floor": "fl", "flr": "fl", "fl": "fl",
+    "building": "bldg", "bldg": "bldg",
+    "mount": "mt", "mt": "mt",
+    "north": "n", "south": "s", "east": "e", "west": "w",
+    "northeast": "ne", "northwest": "nw", "southeast": "se", "southwest": "sw",
+    "near": "nr", "nr": "nr",
+    "opposite": "opp", "opp": "opp",
+    "market": "mkt", "mkt": "mkt",
+    "sector": "sec", "sec": "sec",
+    "centre": "center", "ctr": "center",
+    "number": "no",
+    # French
+    "chemin": "chem", "chem": "chem",
+    "impasse": "imp", "imp": "imp",
+    "route": "rte", "rte": "rte",
+    "faubourg": "fbg", "fbg": "fbg",
+    "allee": "all",
+}
+
+US_STATES = {
+    "alabama": "al", "alaska": "ak", "arizona": "az", "arkansas": "ar",
+    "california": "ca", "colorado": "co", "connecticut": "ct", "delaware": "de",
+    "district of columbia": "dc", "florida": "fl", "georgia": "ga", "hawaii": "hi",
+    "idaho": "id", "illinois": "il", "indiana": "in", "iowa": "ia",
+    "kansas": "ks", "kentucky": "ky", "louisiana": "la", "maine": "me",
+    "maryland": "md", "massachusetts": "ma", "michigan": "mi", "minnesota": "mn",
+    "mississippi": "ms", "missouri": "mo", "montana": "mt", "nebraska": "ne",
+    "nevada": "nv", "new hampshire": "nh", "new jersey": "nj", "new mexico": "nm",
+    "new york": "ny", "north carolina": "nc", "north dakota": "nd", "ohio": "oh",
+    "oklahoma": "ok", "oregon": "or", "pennsylvania": "pa", "rhode island": "ri",
+    "south carolina": "sc", "south dakota": "sd", "tennessee": "tn", "texas": "tx",
+    "utah": "ut", "vermont": "vt", "virginia": "va", "washington": "wa",
+    "west virginia": "wv", "wisconsin": "wi", "wyoming": "wy",
+}
+
+# Longest names first so "west virginia" wins over "virginia".
+US_STATE_PATTERN = re.compile(
+    r"\b(" + "|".join(sorted(map(re.escape, US_STATES), key=len, reverse=True)) + r")\b"
+)
+
+# "www.acme-foods.com" / "acmefoods.co.in" -> "acmefoods" / "acme-foods"
+DOMAIN_PATTERN = re.compile(r"^(?:https?://)?(?:www\.)?([a-z0-9-]+)(?:\.[a-z]{2,})+/?$")
 
 
 # =========================================================
@@ -439,7 +348,7 @@ def normalize_text(value):
     lang_code = detect_indic_script(value)
 
     # -----------------------------------------------------
-    # Indic NLP normalization
+    # Indic NLP normalization + Indic -> Roman
     # -----------------------------------------------------
 
     if lang_code is not None:
@@ -449,21 +358,10 @@ def normalize_text(value):
             lang_code,
         )
 
-        # -------------------------------------------------
-        # Indic -> Roman
-        # -------------------------------------------------
-
         value = transliterate_indic_text(
             value,
             lang_code,
         )
-
-        # -------------------------------------------------
-        # Hindi-specific cleanup
-        # -------------------------------------------------
-
-        if lang_code == "hi":
-            value = clean_hindi_transliteration(value)
 
     # -----------------------------------------------------
     # Unicode normalization
@@ -521,6 +419,10 @@ def normalize_text(value):
     ).strip()
 
 
+def _canonical(text, mapping):
+    return " ".join(mapping.get(token, token) for token in text.split())
+
+
 # =========================================================
 # Name normalization
 # =========================================================
@@ -528,9 +430,30 @@ def normalize_text(value):
 def normalize_name(value):
     """
     Normalize a business name.
+
+    Domain-style names keep only the domain label, and
+    legal / common words are mapped to canonical tokens.
+
+    Example:
+
+        www.maurewilliamscolombier.com -> maurewilliamscolombier
+        Tata Motors Private Limited    -> tata motors pvt ltd
     """
 
-    return normalize_text(value)
+    if value is None:
+        return ""
+
+    raw = str(value).strip().lower()
+    domain = DOMAIN_PATTERN.match(raw)
+    if domain:
+        raw = domain.group(1)
+
+    text = _canonical(normalize_text(raw), NAME_CANONICAL)
+
+    if detect_indic_script(raw):
+        text = _canonical(text, INDIC_NAME_CANONICAL)
+
+    return text
 
 
 def normalize_name_core(value):
@@ -558,9 +481,18 @@ def normalize_name_core(value):
 def normalize_address(value):
     """
     Normalize a business address.
+
+    Example:
+
+        85 Wayne Avenue, Ticonderoga, New York -> 85 wayne ave ticonderoga ny
     """
 
-    return normalize_text(value)
+    text = US_STATE_PATTERN.sub(
+        lambda m: US_STATES[m.group(1)],
+        normalize_text(value),
+    )
+
+    return _canonical(text, ADDRESS_CANONICAL)
 
 
 # =========================================================
@@ -603,23 +535,7 @@ def char_ngrams(value, n=3):
     Generate character n-grams from normalized text.
     """
 
-    text = normalize_text(value).replace(
-        " ",
-        "",
-    )
-
-    if not text:
-        return set()
-
-    if len(text) <= n:
-        return {text}
-
-    return {
-        text[i:i + n]
-        for i in range(
-            len(text) - n + 1
-        )
-    }
+    return trigrams(normalize_text(value), n)
 
 
 # =========================================================

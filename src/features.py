@@ -9,6 +9,7 @@ from joblib import Parallel, delayed
 from rapidfuzz.fuzz import ratio, token_set_ratio
 from rapidfuzz.process import cpdist
 
+from .data import N_JOBS
 from .normalize import digits, trigrams
 
 FEATURE_NAMES = [
@@ -29,7 +30,7 @@ FEATURE_NAMES = [
     "address_len_diff",
 ]
 
-FEATURE_CHUNK = 100_000
+FEATURE_CHUNK = 25_000
 
 
 def jaccard(a, b):
@@ -64,7 +65,7 @@ def _gather(frame, idx, column):
     return frame[column].take(idx).tolist()
 
 
-def compute_features(s1, target, s_idx, t_idx, n_jobs=-1):
+def compute_features(s1, target, s_idx, t_idx, n_jobs=N_JOBS):
     """Return a float32 matrix (len(s_idx) x len(FEATURE_NAMES))."""
     if not len(s_idx):
         return np.empty((0, len(FEATURE_NAMES)), dtype=np.float32)
@@ -76,7 +77,7 @@ def compute_features(s1, target, s_idx, t_idx, n_jobs=-1):
             out += [_gather(s1, si, column), _gather(target, ti, column)]
         return out
 
-    chunks = Parallel(n_jobs=n_jobs)(
+    chunks = Parallel(n_jobs=n_jobs, pre_dispatch="n_jobs")(
         delayed(_chunk_features)(*args(a, a + FEATURE_CHUNK))
         for a in range(0, len(s_idx), FEATURE_CHUNK)
     )

@@ -20,8 +20,11 @@ from .normalize import NORMALIZE_VERSION, normalize_fields
 # Avoids joblib's noisy physical-core detection warning on Windows.
 os.environ.setdefault("LOKY_MAX_CPU_COUNT", str(os.cpu_count()))
 
+# Worker processes for parallel steps; kept low so a 16 GB laptop has headroom.
+N_JOBS = 6
+
 CACHE_DIR = Path("cache")
-NORMALIZE_CHUNK = 50_000
+NORMALIZE_CHUNK = 25_000
 COLUMNS = ["country", "name", "core", "addr"]
 
 
@@ -29,7 +32,7 @@ def _normalize_chunk(names, addresses, countries):
     return [normalize_fields(n, a, c) for n, a, c in zip(names, addresses, countries)]
 
 
-def load_normalized(path, n_jobs=-1):
+def load_normalized(path, n_jobs=N_JOBS):
     """
     Return a DataFrame with entity_id + normalized country/name/core/addr.
     Columns are pyarrow-backed strings to keep ~10M records in memory.

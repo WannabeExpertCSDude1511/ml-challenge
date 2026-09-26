@@ -23,7 +23,9 @@ def _columns(frame, start=0, stop=None):
 
 
 def _keys(country, name, core, addr):
-    keys = [("name", country, name), ("core", country, core), ("addr", country, addr)]
+    # Empty values are not keys: they would put every record missing that
+    # field into one giant block.
+    keys = [(kind, country, value) for kind, value in (("name", name), ("core", core), ("addr", addr)) if value]
     keys += [("num", country, n) for n in digits(addr)]
     keys += [("tok", country, t) for t in set(name.split()) if len(t) >= 4]
     return keys
@@ -50,6 +52,8 @@ def _fuzzy_fallback(queries, target):
             if not qs:
                 continue
             grams = trigrams(name)
+            if not grams:
+                continue
             for i, s_grams in qs:
                 if _jaccard(s_grams, grams) >= FUZZY_BLOCK_THRESHOLD:
                     found[i].append(start + off)
@@ -80,7 +84,9 @@ def generate_candidates(s1, target, verbose=True):
         h = np.unique(np.concatenate(arrays)) if arrays else empty
         hits.append(h)
         if not len(h):
-            fallback.append((i, s_rows[i][0], trigrams(s_rows[i][1])))
+            grams = trigrams(s_rows[i][1])
+            if grams:
+                fallback.append((i, s_rows[i][0], grams))
 
     if fallback:
         for i, found in _fuzzy_fallback(fallback, target).items():
