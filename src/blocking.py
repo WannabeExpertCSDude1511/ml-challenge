@@ -95,34 +95,6 @@ def generate_candidates_for_row(row, target, indices):
     name = normalize_name(row["business_name"])
     core = normalize_name_core(row["business_name"])
     addr = normalize_address(row["business_address"])
-    
-    hits = set()
-    hits |= indices["country_name"].get((country, name), set())
-    hits |= indices["country_core"].get((country, core), set())
-    hits |= indices["country_addr"].get((country, addr), set())
-    
-    for n in numeric_tokens(addr):
-        hits |= indices["country_num"].get((country, n), set())
-        
-    for t in tokens(name):
-        if len(t) >= 4:
-            hits |= indices["token"].get((country, t), set())
-            
-    if not hits:
-    # Fuzzy fallback using the precomputed n-gram index.
-      hits = fuzzy_name_candidates(row, indices)
-        
-    cands = target.loc[sorted(hits)]
-    if "entity_id" in cands.columns:
-        cands = cands.drop_duplicates(subset=["entity_id"])
-    return cands
-
-
-def generate_candidates_for_row(row, target, indices):
-    country = normalize_country(row["country"])
-    name = normalize_name(row["business_name"])
-    core = normalize_name_core(row["business_name"])
-    addr = normalize_address(row["business_address"])
 
     hits = set()
 
@@ -166,3 +138,11 @@ def generate_candidates_for_row(row, target, indices):
         )
 
     return cands
+def generate_candidates(source1, target):
+    indices = build_indices(target)
+    rows = []
+    for _, r in source1.iterrows():
+        c = generate_candidates_for_row(r, target, indices)
+        for _, t in c.iterrows():
+            rows.append((r["entity_id"], t["entity_id"]))
+    return list(dict.fromkeys(rows))
