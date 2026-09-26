@@ -6,3 +6,4 @@ joblib
 xgboost
 indic-nlp-library
 indic-transliteration
+numpy
