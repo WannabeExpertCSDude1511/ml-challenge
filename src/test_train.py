@@ -1,21 +1,11 @@
 """
-Evaluate model on training data with ground truth.
-
-Reports:
-  - Blocking recall (candidate generation quality)
-  - Macro F₀.₅ (the competition metric)
-  - Per-threshold scan to find optimal F₀.₅
-  - Precision / recall breakdown
-
-Usage:
-  python -m src.test_train --data dataset/train --model model.joblib --threshold 0.80
-  python -m src.test_train --data dataset/train --model model.joblib --scan-thresholds
-  python -m src.test_train --data dataset/train --model model.joblib --sample 10000
+Evaluate model on training data with ground truth (Multithreaded).
 """
 
 import argparse
 import time
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import joblib
 import numpy as np
@@ -35,23 +25,48 @@ def parse_truth(gt):
     return out
 
 
+def process_row(args):
+    i, row, gt_dict, target, indices, model, feature_names, idf_weights = args
+    s1_id = row["entity_id"]
+    true_ids = set(gt_dict.get(s1_id, []))
+
+    # Blocking
+    candidates = generate_candidates_for_row(row, target, indices)
+    candidate_ids = set(candidates["entity_id"].tolist())
+
+    # Classification
+    probs_list = []
+    if len(candidates) > 0:
+        X = pd.DataFrame([
+            pair_features(row, r, idf_weights)
+            for _, r in candidates.iterrows()
+        ])
+        X = X.reindex(columns=feature_names, fill_value=0)
+        probs = model.predict_proba(X)[:, 1]
+        probs_list = list(zip(candidates["entity_id"].tolist(), probs.tolist()))
+
+    return {
+        "i": i,
+        "s1_id": s1_id,
+        "true_ids": true_ids,
+        "candidate_ids": candidate_ids,
+        "probs_list": probs_list,
+    }
+
+
 def main():
     ap = argparse.ArgumentParser(description="Evaluate entity resolution on training data.")
     ap.add_argument("--data", default="dataset/train")
     ap.add_argument("--model", default="model.joblib")
     ap.add_argument("--threshold", type=float, default=None)
-    ap.add_argument("--scan-thresholds", action="store_true",
-                    help="Scan thresholds from 0.30 to 0.95")
-    ap.add_argument("--sample", type=int, default=0,
-                    help="Sample N source1 entities (0 = all)")
+    ap.add_argument("--scan-thresholds", action="store_true", help="Scan thresholds from 0.30 to 0.95")
+    ap.add_argument("--sample", type=int, default=0, help="Sample N source1 entities (0 = all)")
+    ap.add_argument("--workers", type=int, default=8, help="Number of threads")
     args = ap.parse_args()
 
     t0 = time.perf_counter()
     d = Path(args.data)
 
-    # --------------------------------------------------------
-    # Load
-    # --------------------------------------------------------
     print("[1/5] Loading data...", flush=True)
     s1 = read_tsv(d / "train_source1.tsv")
     s2 = read_tsv(d / "train_source2.tsv")
@@ -73,51 +88,32 @@ def main():
     print(f"  S1: {len(s1):,}, Target: {len(target):,}", flush=True)
     print(f"  Model: {bundle.get('model_type', 'unknown')}, Threshold: {threshold:.2f}", flush=True)
 
-    # --------------------------------------------------------
-    # Build indices
-    # --------------------------------------------------------
     print("[2/5] Building blocking indices...", flush=True)
     indices = build_indices(target)
 
-    # --------------------------------------------------------
-    # Evaluate
-    # --------------------------------------------------------
-    print("[3/5] Running blocking + classification...", flush=True)
+    print(f"[3/5] Running blocking + classification ({args.workers} threads)...", flush=True)
 
-    all_probs = {}   # {s1_id: [(target_id, prob), ...]}
+    all_probs = {}
     blocking_recall_data = {"total_gt": 0, "found_gt": 0}
     n_total = len(s1)
+    
+    # Prepare arguments for multiprocessing map
+    tasks = [
+        (i, row, gt, target, indices, model, feature_names, idf_weights)
+        for i, (_, row) in enumerate(s1.iterrows())
+    ]
 
-    for i, (_, row) in enumerate(s1.iterrows()):
-        s1_id = row["entity_id"]
-        true_ids = set(gt.get(s1_id, []))
+    processed = 0
+    with ThreadPoolExecutor(max_workers=args.workers) as executor:
+        for res in executor.map(process_row, tasks):
+            processed += 1
+            all_probs[res["s1_id"]] = res["probs_list"]
+            blocking_recall_data["total_gt"] += len(res["true_ids"])
+            blocking_recall_data["found_gt"] += len(res["true_ids"] & res["candidate_ids"])
+            
+            if processed % 500 == 0 or processed == n_total:
+                print(f"  Processed {processed:,}/{n_total:,}", flush=True)
 
-        # Blocking
-        candidates = generate_candidates_for_row(row, target, indices)
-        candidate_ids = set(candidates["entity_id"].tolist())
-
-        # Blocking recall
-        blocking_recall_data["total_gt"] += len(true_ids)
-        blocking_recall_data["found_gt"] += len(true_ids & candidate_ids)
-
-        # Classification
-        if len(candidates) > 0:
-            X = pd.DataFrame([
-                pair_features(row, r, idf_weights)
-                for _, r in candidates.iterrows()
-            ])
-            X = X.reindex(columns=feature_names, fill_value=0)
-            probs = model.predict_proba(X)[:, 1]
-            all_probs[s1_id] = list(zip(candidates["entity_id"].tolist(), probs.tolist()))
-        else:
-            all_probs[s1_id] = []
-
-        if (i + 1) % 10000 == 0:
-            print(f"  Processed {i+1:,}/{n_total:,}", flush=True)
-
-    # --------------------------------------------------------
-    # Blocking recall
-    # --------------------------------------------------------
     print("\n[4/5] Results:", flush=True)
     total_gt = blocking_recall_data["total_gt"]
     found_gt = blocking_recall_data["found_gt"]
@@ -127,9 +123,6 @@ def main():
     print(f"  Found by blocker: {found_gt:,}")
     print(f"  Recall:           {block_recall*100:.2f}%")
 
-    # --------------------------------------------------------
-    # Threshold evaluation
-    # --------------------------------------------------------
     if args.scan_thresholds:
         print(f"\n  === Threshold Scan ===")
         print(f"  {'Threshold':>10s}  {'Macro F0.5':>10s}  {'Precision':>10s}  {'Recall':>10s}")
@@ -160,10 +153,8 @@ def main():
             if f05 > best_f05:
                 best_f05 = f05
                 best_t = t
-
         print(f"\n  Best: threshold={best_t:.2f}, Macro F₀.₅={best_f05:.4f}")
     else:
-        # Single threshold evaluation
         predictions = {}
         total_predicted = 0
         total_correct = 0

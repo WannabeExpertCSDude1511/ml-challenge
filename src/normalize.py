@@ -13,6 +13,7 @@ Handles:
 
 import re
 import unicodedata
+from functools import lru_cache
 
 try:
     from unidecode import unidecode
@@ -189,6 +190,7 @@ def unicode_normalize(value):
 # TRANSLITERATION
 # ============================================================
 
+@lru_cache(maxsize=500000)
 def transliterate(value):
     """
     Convert non-Latin scripts into an ASCII representation.
@@ -208,6 +210,7 @@ def transliterate(value):
 # CORE TEXT NORMALIZATION
 # ============================================================
 
+@lru_cache(maxsize=500000)
 def normalize_text(value):
     """
     General normalization pipeline:
@@ -252,11 +255,13 @@ def normalize_country(value):
 # NAME NORMALIZATION
 # ============================================================
 
+@lru_cache(maxsize=500000)
 def normalize_name(value):
     """Normalize business name: transliterate + clean."""
     return normalize_text(value)
 
 
+@lru_cache(maxsize=500000)
 def normalize_name_leet(value):
     """
     Normalize business name with leet-speak reversal.
@@ -277,6 +282,7 @@ def normalize_name_leet(value):
     return value.strip()
 
 
+@lru_cache(maxsize=500000)
 def normalize_name_core(value):
     """
     Normalize and strip legal suffixes.
@@ -294,11 +300,13 @@ def normalize_name_core(value):
 # ADDRESS NORMALIZATION
 # ============================================================
 
+@lru_cache(maxsize=500000)
 def normalize_address(value):
     """Normalize address: transliterate + clean."""
     return normalize_text(value)
 
 
+@lru_cache(maxsize=500000)
 def normalize_address_stripped(value):
     """
     Normalize address with zero-padding removal.
@@ -316,6 +324,7 @@ def normalize_address_stripped(value):
 # ADDRESS COMPONENT PARSING
 # ============================================================
 
+@lru_cache(maxsize=500000)
 def extract_street_numbers(address: str) -> set:
     """
     Extract all numeric tokens that look like street/house/flat numbers.
@@ -382,6 +391,7 @@ def extract_state(address: str, country: str) -> str:
 # TOKENIZATION
 # ============================================================
 
+@lru_cache(maxsize=500000)
 def tokens(value) -> set:
     """Tokenize normalized text into a set of tokens."""
     value = normalize_text(value)
@@ -415,6 +425,7 @@ COMMON_ADDRESS_TOKENS = {
 }
 
 
+@lru_cache(maxsize=500000)
 def address_tokens(value) -> set:
     """Non-common, non-trivial address tokens (len ≥ 3)."""
     address = normalize_address(value)
@@ -467,6 +478,7 @@ def numeric_tokens(value) -> set:
 # CHARACTER N-GRAMS
 # ============================================================
 
+@lru_cache(maxsize=500000)
 def char_ngrams(value, n=3) -> set:
     """Character n-grams of normalized text (spaces removed)."""
     value = normalize_text(value)
@@ -499,6 +511,7 @@ def token_pairs(value) -> set:
 # PHONETIC ENCODING
 # ============================================================
 
+@lru_cache(maxsize=500000)
 def consonant_skeleton(value: str) -> str:
     """
     Crude phonetic encoding: keep only consonants, collapse runs.
@@ -526,6 +539,7 @@ def consonant_skeleton(value: str) -> str:
     return "".join(result)
 
 
+@lru_cache(maxsize=500000)
 def sorted_token_signature(value: str) -> str:
     """
     Sort name tokens alphabetically (after stripping legal suffixes).

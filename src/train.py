@@ -189,21 +189,25 @@ def main():
 
     positives = set((a, b) for a, ids in gt.items() for b in ids)
 
-    X_rows = []
-    y_labels = []
-    pair_info = []  # (s1_id, target_id) for threshold scanning
+    from concurrent.futures import ThreadPoolExecutor
+    def process_pair(args):
+        a_id, b_id = args
+        return pair_features(s1_by_id.loc[a_id], target_by_id.loc[b_id], idf_weights)
 
-    n_pairs = len(pairs)
-    for i, (a_id, b_id) in enumerate(pairs):
-        if a_id not in s1_by_id.index or b_id not in target_by_id.index:
-            continue
-        x = pair_features(s1_by_id.loc[a_id], target_by_id.loc[b_id], idf_weights)
-        X_rows.append(x)
-        y_labels.append(int((a_id, b_id) in positives))
-        pair_info.append((a_id, b_id))
+    valid_pairs = [(a, b) for a, b in pairs if a in s1_by_id.index and b in target_by_id.index]
+    n_pairs = len(valid_pairs)
+    
+    X_rows = [None] * n_pairs
+    processed = 0
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        for i, x in enumerate(executor.map(process_pair, valid_pairs)):
+            X_rows[i] = x
+            processed += 1
+            if processed % 100000 == 0 or processed == n_pairs:
+                print(f"  Features computed: {processed:,}/{n_pairs:,}", flush=True)
 
-        if (i + 1) % 500000 == 0:
-            print(f"  Features computed: {i+1:,}/{n_pairs:,}", flush=True)
+    y_labels = [int(p in positives) for p in valid_pairs]
+    pair_info = valid_pairs
 
     X = pd.DataFrame(X_rows).replace([np.inf, -np.inf], np.nan).fillna(0)
     y = np.asarray(y_labels)
