@@ -36,7 +36,11 @@ pip install -r requirements.txt
 Run from the project root:
 
 ```bash
-python -m src.train --data dataset/train --model model.joblib
+# Default: HistGradientBoostingClassifier
+python -m src.train --data dataset/train --model model.joblib --model-type histgb
+
+# XGBoost Classifier
+python -m src.train --data dataset/train --model model.joblib --model-type xgboost
 ```
 
 ## Predict
@@ -46,6 +50,35 @@ python -m src.predict --data dataset/test --model model.joblib --output output -
 ```
 
 The threshold is intentionally exposed as a parameter. It should be selected using an entity-level validation split and the competition's macro F_0.5 metric rather than assumed to be optimal.
+
+## Test on Training Data
+
+Evaluate the model against ground truth data (evaluating candidate recall, pair precision/recall, and Macro $F_{0.5}$):
+
+```bash
+python -m src.test_train --data dataset/train --model model.joblib --threshold 0.80
+```
+
+To scan multiple thresholds to find the optimal Macro $F_{0.5}$ threshold:
+
+```bash
+python -m src.test_train --data dataset/train --model model.joblib --scan-thresholds
+```
+
+## Test Blocking Stage Alone
+
+Run heavy diagnostics and key attribution benchmarks on candidate generation & blocking:
+
+```bash
+# Convenient one-step executable script (auto-handles virtual environment)
+./run_test_blocking.sh
+
+# Or directly via Python module (sample of 10,000 entities with failure diagnostics)
+python -m src.test_blocking --data dataset/train --sample-size 10000 --show-missed 10
+
+# Direct Python run on full training dataset
+python -m src.test_blocking --data dataset/train --sample-size 0
+```
 
 ## Validate submission
 
