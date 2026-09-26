@@ -1,512 +1,214 @@
 """
-Evaluate blocking quality on the GT-preserving debug dataset.
+Evaluate blocking quality on training data.
 
 Metrics:
+  1. Blocking recall (match-level and S1-level)
+  2. Average / median / max candidates per S1
+  3. Candidate reduction ratio
+  4. Per-strategy attribution
+  5. Runtime
 
-    1. Blocking recall
-    2. Average candidates per S1
-    3. Median candidates per S1
-    4. Maximum candidates for one S1
-    5. Total candidate pairs
-    6. Candidate reduction
-    7. Number of S1 records with zero candidates
-    8. Number of S1 records where at least one GT match
-       was found
-    9. Number of S1 records where ALL GT matches were found
-   10. Runtime
+Usage:
+  python -m src.test_blocking --data dataset/train --sample-size 10000
+  python -m src.test_blocking --data dataset/train --sample-size 0  # full dataset
 """
 
+import argparse
 import time
 from pathlib import Path
 
 import pandas as pd
 
-from src.blocking import (
+from .io import read_tsv
+from .blocking import (
     build_indices,
     generate_candidates_for_row,
+    blocking_debug_info,
 )
-
-
-# =========================================================
-# PATHS
-# =========================================================
-
-DATA_DIR = Path(
-    "dataset/train"
-)
-
-S1_FILE = (
-    DATA_DIR /
-    "train_source1.tsv"
-)
-
-S2_FILE = (
-    DATA_DIR /
-    "train_source2.tsv"
-)
-
-S3_FILE = (
-    DATA_DIR /
-    "train_source3.tsv"
-)
-
-GT_FILE = (
-    DATA_DIR /
-    "train_ground_truth.tsv"
-)
-
-
-# =========================================================
-# HELPERS
-# =========================================================
-
-def read_tsv(path):
-
-    return pd.read_csv(
-        path,
-        sep="\t",
-        dtype=str,
-        keep_default_na=False,
-    )
 
 
 def split_ids(value):
-
     if not value:
         return set()
+    return {x.strip() for x in value.split(",") if x.strip()}
 
-    return {
-        x.strip()
-        for x in value.split(",")
-        if x.strip()
-    }
-
-
-# =========================================================
-# MAIN
-# =========================================================
 
 def main():
+    ap = argparse.ArgumentParser(description="Evaluate blocking quality.")
+    ap.add_argument("--data", default="dataset/train")
+    ap.add_argument("--sample-size", type=int, default=10000,
+                    help="Number of S1 entities to evaluate (0 = all)")
+    ap.add_argument("--show-missed", type=int, default=5,
+                    help="Number of missed pairs to display")
+    args = ap.parse_args()
+
+    d = Path(args.data)
 
     print("=" * 70)
-    print("BLOCKING EVALUATION")
+    print("BLOCKING EVALUATION (v2 — 8 strategies)")
     print("=" * 70)
 
-    # -----------------------------------------------------
+    # --------------------------------------------------------
     # Load data
-    # -----------------------------------------------------
+    # --------------------------------------------------------
+    print("\n[1/5] Loading data...", flush=True)
+    s1 = read_tsv(d / "train_source1.tsv")
+    s2 = read_tsv(d / "train_source2.tsv")
+    s3 = read_tsv(d / "train_source3.tsv")
+    gt = read_tsv(d / "train_ground_truth.tsv")
 
-    start_total = time.perf_counter()
+    target = pd.concat([s2, s3], ignore_index=True)
 
-    print("\n[1/5] Loading debug dataset...")
+    if args.sample_size > 0 and args.sample_size < len(s1):
+        print(f"  Sampling {args.sample_size} source1 entities...", flush=True)
+        s1 = s1.sample(n=args.sample_size, random_state=42).reset_index(drop=True)
 
-    s1 = read_tsv(
-        S1_FILE
-    )
+    print(f"  S1: {len(s1):,}, Target: {len(target):,}", flush=True)
 
-    s2 = read_tsv(
-        S2_FILE
-    )
-
-    s3 = read_tsv(
-        S3_FILE
-    )
-
-    gt = read_tsv(
-        GT_FILE
-    )
-
-    target = pd.concat(
-        [
-            s2,
-            s3,
-        ],
-        ignore_index=True,
-    )
-
-    print(
-        f"S1 records : {len(s1):,}"
-    )
-
-    print(
-        f"S2 records : {len(s2):,}"
-    )
-
-    print(
-        f"S3 records : {len(s3):,}"
-    )
-
-    print(
-        f"Target     : {len(target):,}"
-    )
-
-    print(
-        f"GT records : {len(gt):,}"
-    )
-
-    # -----------------------------------------------------
-    # Build indexes
-    # -----------------------------------------------------
-
-    print(
-        "\n[2/5] Building blocking indexes..."
-    )
-
-    start_index = time.perf_counter()
-
-    indices = build_indices(
-        target
-    )
-
-    index_time = (
-        time.perf_counter()
-        - start_index
-    )
-
-    print(
-        f"Index construction: "
-        f"{index_time:.2f} seconds"
-    )
-
-    # -----------------------------------------------------
+    # --------------------------------------------------------
     # Build GT lookup
-    # -----------------------------------------------------
-
-    print(
-        "\n[3/5] Preparing GT..."
-    )
-
+    # --------------------------------------------------------
+    print("\n[2/5] Preparing ground truth...", flush=True)
     gt_lookup = {}
+    for _, row in gt.iterrows():
+        gt_lookup[row["source1_entity_id"]] = split_ids(row["matched_entity_ids"])
 
-    for row in gt.itertuples(
-        index=False
-    ):
+    # --------------------------------------------------------
+    # Build indices
+    # --------------------------------------------------------
+    print("\n[3/5] Building blocking indices...", flush=True)
+    t_idx = time.perf_counter()
+    indices = build_indices(target)
+    index_time = time.perf_counter() - t_idx
+    print(f"  Index construction: {index_time:.1f}s", flush=True)
 
-        gt_lookup[
-            row.source1_entity_id
-        ] = split_ids(
-            row.matched_entity_ids
-        )
-
-    # -----------------------------------------------------
-    # Evaluate each S1
-    # -----------------------------------------------------
-
-    print(
-        "\n[4/5] Running blocker..."
-    )
+    # --------------------------------------------------------
+    # Evaluate
+    # --------------------------------------------------------
+    print("\n[4/5] Running blocker...", flush=True)
+    t_block = time.perf_counter()
 
     candidate_counts = []
+    total_gt = 0
+    found_gt = 0
+    s1_with_any = 0
+    s1_with_all = 0
+    s1_zero_candidates = 0
+    total_candidates = 0
 
-    total_gt_matches = 0
-    total_found_gt_matches = 0
+    # Strategy attribution
+    strategy_counts = {}
 
-    s1_with_any_match = 0
-    s1_with_all_matches = 0
-    s1_with_zero_candidates = 0
+    missed_examples = []
 
-    total_candidate_pairs = 0
-
-    start_blocking = time.perf_counter()
-
-    # -----------------------------------------------------
-    # Use itertuples.
-    # -----------------------------------------------------
-
-    for row in s1.itertuples(
-        index=False
-    ):
-
-        source_id = row.entity_id
-
+    for i, (_, row) in enumerate(s1.iterrows()):
+        source_id = row["entity_id"]
         source_row = {
-            "entity_id": row.entity_id,
-            "business_name": row.business_name,
-            "business_address": row.business_address,
-            "country": row.country,
+            "entity_id": row["entity_id"],
+            "business_name": row["business_name"],
+            "business_address": row["business_address"],
+            "country": row["country"],
         }
 
-        candidates = (
-            generate_candidates_for_row(
-                source_row,
-                target,
-                indices,
-            )
-        )
+        candidates = generate_candidates_for_row(source_row, target, indices)
+        candidate_ids = set(candidates["entity_id"].astype(str))
+        n_cands = len(candidate_ids)
 
-        candidate_ids = set(
-            candidates[
-                "entity_id"
-            ].astype(str)
-        )
+        candidate_counts.append(n_cands)
+        total_candidates += n_cands
 
-        candidate_count = len(
-            candidate_ids
-        )
-
-        candidate_counts.append(
-            candidate_count
-        )
-
-        total_candidate_pairs += (
-            candidate_count
-        )
-
-        # -------------------------------------------------
-        # GT
-        # -------------------------------------------------
-
-        true_ids = gt_lookup.get(
-            source_id,
-            set(),
-        )
-
-        total_gt_matches += len(
-            true_ids
-        )
-
-        found_ids = (
-            true_ids &
-            candidate_ids
-        )
-
-        total_found_gt_matches += (
-            len(found_ids)
-        )
+        true_ids = gt_lookup.get(source_id, set())
+        total_gt += len(true_ids)
+        found_ids = true_ids & candidate_ids
+        found_gt += len(found_ids)
 
         if found_ids:
-            s1_with_any_match += 1
+            s1_with_any += 1
+        if true_ids and found_ids == true_ids:
+            s1_with_all += 1
+        if n_cands == 0:
+            s1_zero_candidates += 1
 
-        if (
-            true_ids
-            and found_ids == true_ids
-        ):
-            s1_with_all_matches += 1
+        # Collect missed examples
+        missed = true_ids - found_ids
+        if missed and len(missed_examples) < args.show_missed:
+            missed_examples.append({
+                "s1_id": source_id,
+                "s1_name": row["business_name"],
+                "s1_addr": row["business_address"],
+                "s1_country": row["country"],
+                "missed_ids": list(missed)[:3],
+            })
 
-        if candidate_count == 0:
-            s1_with_zero_candidates += 1
+        # Strategy attribution (sample for first 1000)
+        if i < 1000 and true_ids:
+            debug = blocking_debug_info(source_row, target, indices)
+            for strat, count in debug.items():
+                if strat != "total":
+                    strategy_counts[strat] = strategy_counts.get(strat, 0) + (1 if count > 0 else 0)
 
-    blocking_time = (
-        time.perf_counter()
-        - start_blocking
-    )
+        if (i + 1) % 10000 == 0:
+            print(f"  Processed {i+1:,}/{len(s1):,}", flush=True)
 
-    total_time = (
-        time.perf_counter()
-        - start_total
-    )
+    block_time = time.perf_counter() - t_block
+    total_time = time.perf_counter() - t_idx
 
-    # =====================================================
-    # METRICS
-    # =====================================================
+    # --------------------------------------------------------
+    # Results
+    # --------------------------------------------------------
+    print("\n[5/5] RESULTS")
+    print("=" * 70)
 
-    candidate_series = pd.Series(
-        candidate_counts
-    )
+    cs = pd.Series(candidate_counts)
+    possible_pairs = len(s1) * len(target)
+    reduction = 1 - (total_candidates / possible_pairs) if possible_pairs > 0 else 0
+    recall = found_gt / total_gt if total_gt > 0 else 0
 
-    # -----------------------------------------------------
-    # Match-level recall
-    # -----------------------------------------------------
+    print(f"  S1 records:                {len(s1):,}")
+    print(f"  Target records:            {len(target):,}")
+    print(f"  Possible pairs:            {possible_pairs:,}")
+    print(f"  Actual candidate pairs:    {total_candidates:,}")
+    print(f"  Candidate reduction:       {reduction*100:.4f}%")
 
-    if total_gt_matches > 0:
+    print(f"\n  --- Candidate statistics ---")
+    print(f"  Average per S1:    {cs.mean():.1f}")
+    print(f"  Median per S1:     {cs.median():.0f}")
+    print(f"  Max per S1:        {cs.max():,}")
+    print(f"  S1 with 0 cands:   {s1_zero_candidates:,}")
 
-        recall = (
-            total_found_gt_matches
-            / total_gt_matches
-        )
+    print(f"\n  --- Blocking recall ---")
+    print(f"  Total GT matches:         {total_gt:,}")
+    print(f"  Found by blocker:         {found_gt:,}")
+    print(f"  Match-level recall:       {recall*100:.2f}%")
+    print(f"  S1 with ≥1 GT found:      {s1_with_any:,}/{len(s1):,}")
+    print(f"  S1 with ALL GT found:     {s1_with_all:,}/{len(s1):,}")
 
-    else:
+    if strategy_counts:
+        print(f"\n  --- Strategy attribution (first 1K S1 entities) ---")
+        for strat, count in sorted(strategy_counts.items(), key=lambda x: -x[1]):
+            print(f"  {strat:25s}: {count:,} entities had hits")
 
-        recall = 0.0
+    if missed_examples:
+        print(f"\n  --- Missed pair examples ---")
+        for ex in missed_examples:
+            print(f"  S1: {ex['s1_id']}")
+            print(f"      Name: {ex['s1_name']}")
+            print(f"      Addr: {ex['s1_addr']}")
+            print(f"      Country: {ex['s1_country']}")
+            # Look up missed targets
+            for mid in ex["missed_ids"]:
+                if mid in target.set_index("entity_id").index:
+                    t_row = target.set_index("entity_id").loc[mid]
+                    print(f"      MISSED: {mid}")
+                    print(f"        Name: {t_row.get('business_name', '?')}")
+                    print(f"        Addr: {t_row.get('business_address', '?')}")
+            print()
 
-    # -----------------------------------------------------
-    # Candidate reduction
-    #
-    # Without blocking, every S1 could theoretically be
-    # compared with every target.
-    # -----------------------------------------------------
-
-    possible_pairs = (
-        len(s1) *
-        len(target)
-    )
-
-    if possible_pairs > 0:
-
-        reduction = (
-            1
-            -
-            (
-                total_candidate_pairs
-                /
-                possible_pairs
-            )
-        )
-
-    else:
-
-        reduction = 0.0
-
-    # -----------------------------------------------------
-    # S1-level recall
-    #
-    # "Did we find at least one true match?"
-    # -----------------------------------------------------
-
-    if len(s1) > 0:
-
-        s1_any_recall = (
-            s1_with_any_match
-            /
-            len(s1)
-        )
-
-    else:
-
-        s1_any_recall = 0.0
-
-    # -----------------------------------------------------
-    # Complete-match recall
-    #
-    # "Did we find ALL GT matches for this S1?"
-    # -----------------------------------------------------
-
-    if len(s1) > 0:
-
-        s1_all_recall = (
-            s1_with_all_matches
-            /
-            len(s1)
-        )
-
-    else:
-
-        s1_all_recall = 0.0
-
-    # =====================================================
-    # RESULTS
-    # =====================================================
-
-    print(
-        "\n[5/5] RESULTS"
-    )
-
-    print(
-        "\n" + "=" * 70
-    )
-
-    print(
-        f"S1 records:                  "
-        f"{len(s1):,}"
-    )
-
-    print(
-        f"Target records:              "
-        f"{len(target):,}"
-    )
-
-    print(
-        f"Total possible pairs:        "
-        f"{possible_pairs:,}"
-    )
-
-    print(
-        f"Actual candidate pairs:      "
-        f"{total_candidate_pairs:,}"
-    )
-
-    print(
-        f"Candidate reduction:         "
-        f"{reduction * 100:.4f}%"
-    )
-
-    print(
-        "\n--- Candidate statistics ---"
-    )
-
-    print(
-        f"Average candidates / S1:     "
-        f"{candidate_series.mean():.2f}"
-    )
-
-    print(
-        f"Median candidates / S1:      "
-        f"{candidate_series.median():.2f}"
-    )
-
-    print(
-        f"Maximum candidates / S1:     "
-        f"{candidate_series.max():,}"
-    )
-
-    print(
-        f"S1 with zero candidates:     "
-        f"{s1_with_zero_candidates:,}"
-    )
-
-    print(
-        "\n--- Blocking recall ---"
-    )
-
-    print(
-        f"Total GT matches:             "
-        f"{total_gt_matches:,}"
-    )
-
-    print(
-        f"GT matches found:             "
-        f"{total_found_gt_matches:,}"
-    )
-
-    print(
-        f"Match-level recall:           "
-        f"{recall * 100:.4f}%"
-    )
-
-    print(
-        f"S1 with ≥1 GT match found:    "
-        f"{s1_with_any_match:,}"
-        f" / {len(s1):,}"
-    )
-
-    print(
-        f"S1-level recall:              "
-        f"{s1_any_recall * 100:.4f}%"
-    )
-
-    print(
-        f"S1 with ALL GT matches found: "
-        f"{s1_with_all_matches:,}"
-        f" / {len(s1):,}"
-    )
-
-    print(
-        f"Complete-match recall:        "
-        f"{s1_all_recall * 100:.4f}%"
-    )
-
-    print(
-        "\n--- Runtime ---"
-    )
-
-    print(
-        f"Index construction:           "
-        f"{index_time:.2f}s"
-    )
-
-    print(
-        f"Blocking:                     "
-        f"{blocking_time:.2f}s"
-    )
-
-    print(
-        f"Total:                        "
-        f"{total_time:.2f}s"
-    )
-
-    print(
-        "=" * 70
-    )
+    print(f"\n  --- Runtime ---")
+    print(f"  Index:    {index_time:.1f}s")
+    print(f"  Blocking: {block_time:.1f}s")
+    print(f"  Total:    {total_time:.1f}s")
+    print("=" * 70)
 
 
 if __name__ == "__main__":

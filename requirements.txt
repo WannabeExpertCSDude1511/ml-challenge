@@ -3,7 +3,7 @@ numpy
 scikit-learn
 rapidfuzz
 joblib
+lightgbm
 xgboost
-indic-nlp-library
-indic-transliteration
-numpy
+unidecode
+scipy
