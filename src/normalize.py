@@ -564,12 +564,9 @@ def normalize_address(value):
 
 def tokens(value):
     """
-    Return normalized word tokens.
+    Return word tokens from already-normalized text.
     """
-
-    return set(
-        normalize_text(value).split()
-    )
+    return set(value.split())
 
 
 # =========================================================
@@ -580,7 +577,6 @@ def numeric_tokens(value):
     """
     Extract numeric tokens.
     """
-
     return set(
         re.findall(
             r"\d+",
@@ -595,10 +591,10 @@ def numeric_tokens(value):
 
 def char_ngrams(value, n=3):
     """
-    Generate character n-grams from normalized text.
+    Generate character n-grams from already-normalized text.
     """
 
-    text = normalize_text(value).replace(
+    text = value.replace(
         " ",
         "",
     )
@@ -615,7 +611,6 @@ def char_ngrams(value, n=3):
             len(text) - n + 1
         )
     }
-
 
 # =========================================================
 # Country normalization
