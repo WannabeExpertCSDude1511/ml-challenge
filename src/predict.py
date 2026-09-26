@@ -5,7 +5,7 @@ import joblib
 import numpy as np
 import pandas as pd
 
-from .blocking import generate_candidates
+from .blocking import BlockingIndex
 from .data import load_split
 from .features import compute_features
 from .io import write_tsv
@@ -17,19 +17,21 @@ def main():
     ap.add_argument("--model", default="model.joblib")
     ap.add_argument("--output", default="output")
     ap.add_argument("--threshold", type=float, default=None, help="Defaults to the threshold chosen in train.py")
-    ap.add_argument("--s1-chunk", type=int, default=100_000, help="S1 records scored per batch (bounds memory)")
+    ap.add_argument("--s1-chunk", type=int, default=25_000, help="S1 records scored per batch (bounds memory)")
     args = ap.parse_args()
 
     s1, target = load_split(args.data, "test")
     bundle = joblib.load(args.model)
     model = bundle["model"]
     threshold = args.threshold if args.threshold is not None else bundle.get("threshold", 0.5)
-    print(f"S1: {len(s1):,}  targets: {len(target):,}  threshold: {threshold}", flush=True)
+    k = bundle["k"]
+    print(f"S1: {len(s1):,}  targets: {len(target):,}  threshold: {threshold}  k: {k}", flush=True)
+    index = BlockingIndex(target)
 
     results, candidates_out = [], []
     for start in range(0, len(s1), args.s1_chunk):
         part = s1.iloc[start:start + args.s1_chunk].reset_index(drop=True)
-        s_idx, t_idx = generate_candidates(part, target)
+        s_idx, t_idx = index.query(part, k)
         X = compute_features(part, target, s_idx, t_idx)
         probs = model.predict_proba(X)[:, 1] if len(X) else np.empty(0)
 
@@ -41,6 +43,7 @@ def main():
             ids = t_ids[a:b]
             candidates_out.append((s_id, ",".join(ids)))
             results.append((s_id, ",".join(ids[probs[a:b] >= threshold])))
+        del X, probs, t_ids
         print(f"  scored S1 {start + len(part):,}/{len(s1):,}", flush=True)
 
     out = Path(args.output)

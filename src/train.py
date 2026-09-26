@@ -6,7 +6,7 @@ import joblib
 import numpy as np
 from sklearn.ensemble import HistGradientBoostingClassifier
 
-from .blocking import generate_candidates
+from .blocking import DEFAULT_K, BlockingIndex
 from .data import load_split, load_truth, split_s1, truth_positions
 from .evaluate import blocking_stats, label_pairs, print_stats, select_threshold
 from .features import FEATURE_NAMES, compute_features
@@ -70,10 +70,10 @@ def sample_negatives(s_idx, y, per_s1, seed=0):
     return np.sort(order[keep])
 
 
-def candidates_for(s1, positions, target, truth):
+def candidates_for(s1, positions, target, truth, index, k):
     part = s1.iloc[positions].reset_index(drop=True)
     ids = part["entity_id"].tolist()
-    s_idx, t_idx = generate_candidates(part, target)
+    s_idx, t_idx = index.query(part, k)
     truth_pos, n_true = truth_positions(ids, truth, target)
     y = label_pairs(s_idx, t_idx, truth_pos)
     return part, s_idx, t_idx, y, n_true
@@ -88,16 +88,19 @@ def main():
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--sample-size", type=int, default=10000, help="S1 records used (train + holdout); 0 = all")
     ap.add_argument("--neg-per-s1", type=int, default=100, help="Max negative candidates per S1 used for training")
+    ap.add_argument("--k", type=int, default=DEFAULT_K, help="Blocking: top-k per ranking (saved with the model)")
     args = ap.parse_args()
 
     started = time.perf_counter()
     s1, target = load_split(args.data, "train")
-    truth = load_truth(args.data)
     train_pos, hold_pos = split_s1(len(s1), args.holdout, args.seed, args.sample_size)
+    truth = load_truth(args.data, s1["entity_id"].take(np.r_[train_pos, hold_pos]).tolist())
     print(f"S1 train: {len(train_pos):,}  S1 holdout: {len(hold_pos):,}  targets: {len(target):,}", flush=True)
 
+    index = BlockingIndex(target)
+
     # ---------------- train ----------------
-    part, s_idx, t_idx, y, n_true = candidates_for(s1, train_pos, target, truth)
+    part, s_idx, t_idx, y, n_true = candidates_for(s1, train_pos, target, truth, index, args.k)
     keep = sample_negatives(s_idx, y, args.neg_per_s1, args.seed)
     X = compute_features(part, target, s_idx[keep], t_idx[keep])
     y_train = y[keep]
@@ -109,13 +112,15 @@ def main():
     del X
 
     report = {"train_blocking": blocking_stats(s_idx, y, n_true, len(target))}
+    del part, s_idx, t_idx, y, keep, y_train
 
     # ---------------- evaluate on holdout ----------------
     threshold = 0.5
     if len(hold_pos):
-        part, s_idx, t_idx, y, n_true = candidates_for(s1, hold_pos, target, truth)
+        part, s_idx, t_idx, y, n_true = candidates_for(s1, hold_pos, target, truth, index, args.k)
         X = compute_features(part, target, s_idx, t_idx)
         probs = model.predict_proba(X)[:, 1] if len(X) else np.empty(0)
+        del X
         threshold, f05_best, f05_crossfit = select_threshold(s_idx, probs, y, n_true, args.seed)
         report["holdout_blocking"] = blocking_stats(s_idx, y, n_true, len(target))
         report["holdout_f05"] = {
@@ -137,6 +142,7 @@ def main():
             "features": FEATURE_NAMES,
             "model_type": args.model_type,
             "threshold": threshold,
+            "k": args.k,
             "report": report,
         },
         args.model,
