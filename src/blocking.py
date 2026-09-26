@@ -230,7 +230,7 @@ class BlockingIndex:
         else:
             self._build(target)
             if cache is not None:
-                self._save(cache)
+                self._save(cache, target.attrs["cache_key"])
                 # Swap the in-memory copy for the memory-mapped one.
                 self.groups = None
                 self._load(cache)
@@ -284,11 +284,15 @@ class BlockingIndex:
             self.groups[labels[c]] = (rows, stacked.tocsc().T)
             del stacked
 
-    def _save(self, path):
+    def _save(self, path, key):
         """One .npy file per array, so loading can memory-map instead of copying."""
         CACHE_DIR.mkdir(exist_ok=True)
+        # Replace older indexes of the same target data only (train and test
+        # indexes live side by side).
         for old in CACHE_DIR.glob("blocking-index-*"):
-            shutil.rmtree(old, ignore_errors=True)
+            meta = old / "meta.json"
+            if not meta.exists() or json.loads(meta.read_text()).get("key") == key:
+                shutil.rmtree(old, ignore_errors=True)
         tmp = path.with_name(path.name + ".tmp")
         shutil.rmtree(tmp, ignore_errors=True)
         tmp.mkdir()
@@ -302,7 +306,7 @@ class BlockingIndex:
         for name, array in arrays.items():
             np.save(tmp / f"{name}.npy", array)
         shapes = [list(m.shape) for _, m in self.groups.values()]
-        (tmp / "meta.json").write_text(json.dumps({"labels": labels, "shapes": shapes}))
+        (tmp / "meta.json").write_text(json.dumps({"key": key, "labels": labels, "shapes": shapes}))
         tmp.replace(path)
 
     def _load(self, path):
