@@ -1,99 +1,98 @@
+"""
+Candidate generation (blocking), shared by train.py, predict.py and
+test_blocking.py.
+
+generate_candidates(s1, target) takes the normalized frames from
+data.load_normalized() and returns two aligned int arrays (s_idx, t_idx):
+row positions into s1 and target, sorted by s_idx then t_idx.
+"""
+import time
 from collections import defaultdict
-from .normalize import (
-    normalize_country,
-    normalize_name,
-    normalize_name_core,
-    normalize_address,
-    tokens,
-    numeric_tokens,
-    char_ngrams,
-    jaccard,
-)
 
+import numpy as np
 
-def _add(index, key, row_idx):
-    if key:
-        index[key].add(row_idx)
-
-
-def build_indices(target):
-    idx = {k: defaultdict(set) for k in ("country_name", "country_core", "country_addr", "country_num", "token")}
-    for i, r in target.iterrows():
-        country = normalize_country(r["country"])
-        name = normalize_name(r["business_name"])
-        core = normalize_name_core(r["business_name"])
-        addr = normalize_address(r["business_address"])
-        
-        _add(idx["country_name"], (country, name), i)
-        _add(idx["country_core"], (country, core), i)
-        _add(idx["country_addr"], (country, addr), i)
-        
-        for n in numeric_tokens(addr):
-            _add(idx["country_num"], (country, n), i)
-            
-        for t in tokens(name):
-            if len(t) >= 4:
-                _add(idx["token"], (country, t), i)
-                
-    return idx
-
+from .normalize import digits, trigrams
 
 FUZZY_BLOCK_THRESHOLD = 0.60
+SCAN_CHUNK = 200_000
 
 
-def fuzzy_name_candidates(row, target):
-    country = normalize_country(row["country"])
-    name = normalize_name(row["business_name"])
-    source_ngrams = char_ngrams(name)
-
-    hits = set()
-
-    for i, r in target.iterrows():
-        if normalize_country(r["country"]) != country:
-            continue
-
-        target_name = normalize_name(r["business_name"])
-        target_ngrams = char_ngrams(target_name)
-
-        if jaccard(source_ngrams, target_ngrams) >= FUZZY_BLOCK_THRESHOLD:
-            hits.add(i)
-
-    return hits
+def _columns(frame, start=0, stop=None):
+    part = frame.iloc[start:stop]
+    return zip(*(part[c].tolist() for c in ("country", "name", "core", "addr")))
 
 
-def generate_candidates_for_row(row, target, indices):
-    country = normalize_country(row["country"])
-    name = normalize_name(row["business_name"])
-    core = normalize_name_core(row["business_name"])
-    addr = normalize_address(row["business_address"])
-    
-    hits = set()
-    hits |= indices["country_name"].get((country, name), set())
-    hits |= indices["country_core"].get((country, core), set())
-    hits |= indices["country_addr"].get((country, addr), set())
-    
-    for n in numeric_tokens(addr):
-        hits |= indices["country_num"].get((country, n), set())
-        
-    for t in tokens(name):
-        if len(t) >= 4:
-            hits |= indices["token"].get((country, t), set())
-            
-    if not hits:
-        # Conservative fallback: same-country records only.
-        hits = fuzzy_name_candidates(row, target)
-        
-    cands = target.loc[sorted(hits)]
-    if "entity_id" in cands.columns:
-        cands = cands.drop_duplicates(subset=["entity_id"])
-    return cands
+def _keys(country, name, core, addr):
+    keys = [("name", country, name), ("core", country, core), ("addr", country, addr)]
+    keys += [("num", country, n) for n in digits(addr)]
+    keys += [("tok", country, t) for t in set(name.split()) if len(t) >= 4]
+    return keys
 
 
-def generate_candidates(source1, target):
-    indices = build_indices(target)
-    rows = []
-    for _, r in source1.iterrows():
-        c = generate_candidates_for_row(r, target, indices)
-        for _, t in c.iterrows():
-            rows.append((r["entity_id"], t["entity_id"]))
-    return list(dict.fromkeys(rows))
+def _jaccard(a, b):
+    if not a and not b:
+        return 1.0
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
+
+
+def _fuzzy_fallback(queries, target):
+    """Same-country name-trigram Jaccard >= threshold, one pass over target."""
+    by_country = defaultdict(list)
+    for i, country, grams in queries:
+        by_country[country].append((i, grams))
+
+    found = defaultdict(list)
+    for start in range(0, len(target), SCAN_CHUNK):
+        for off, (country, name, _, _) in enumerate(_columns(target, start, start + SCAN_CHUNK)):
+            qs = by_country.get(country)
+            if not qs:
+                continue
+            grams = trigrams(name)
+            for i, s_grams in qs:
+                if _jaccard(s_grams, grams) >= FUZZY_BLOCK_THRESHOLD:
+                    found[i].append(start + off)
+    return found
+
+
+def generate_candidates(s1, target, verbose=True):
+    start_time = time.perf_counter()
+
+    s_rows = list(_columns(s1))
+    s_keys = [_keys(*r) for r in s_rows]
+    wanted = {k for keys in s_keys for k in keys}
+
+    # Inverted index restricted to keys that some S1 record actually uses.
+    postings = defaultdict(list)
+    for start in range(0, len(target), SCAN_CHUNK):
+        for off, rec in enumerate(_columns(target, start, start + SCAN_CHUNK)):
+            for k in _keys(*rec):
+                if k in wanted:
+                    postings[k].append(start + off)
+    postings = {k: np.asarray(v, dtype=np.int32) for k, v in postings.items()}
+
+    empty = np.empty(0, dtype=np.int32)
+    hits = []
+    fallback = []
+    for i, keys in enumerate(s_keys):
+        arrays = [postings[k] for k in keys if k in postings]
+        h = np.unique(np.concatenate(arrays)) if arrays else empty
+        hits.append(h)
+        if not len(h):
+            fallback.append((i, s_rows[i][0], trigrams(s_rows[i][1])))
+
+    if fallback:
+        for i, found in _fuzzy_fallback(fallback, target).items():
+            hits[i] = np.asarray(sorted(found), dtype=np.int32)
+
+    s_idx = np.repeat(np.arange(len(hits), dtype=np.int32), [len(h) for h in hits])
+    t_idx = np.concatenate(hits) if hits else empty
+
+    if verbose:
+        print(
+            f"Blocking: {len(s_idx):,} candidate pairs for {len(s1):,} S1 records "
+            f"({len(fallback):,} used the fuzzy fallback) in {time.perf_counter() - start_time:.0f}s",
+            flush=True,
+        )
+    return s_idx, t_idx

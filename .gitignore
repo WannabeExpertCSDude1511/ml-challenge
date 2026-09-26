@@ -1,3 +1,9 @@
 dataset/
+output/
+cache/
+__pycache__/
+*.pyc
+*.joblib
+*.pkl
 .DS_Store
 .venv

@@ -1,22 +1,15 @@
 import argparse
 import json
-from pathlib import Path
+import time
+
 import joblib
 import numpy as np
-import pandas as pd
 from sklearn.ensemble import HistGradientBoostingClassifier
 
-from .io import read_tsv
 from .blocking import generate_candidates
-from .features import pair_features
-
-
-def parse_truth(gt):
-    out = {}
-    for _, r in gt.iterrows():
-        raw = r["matched_entity_ids"]
-        out[r["source1_entity_id"]] = [x for x in raw.split(",") if x]
-    return out
+from .data import load_split, load_truth, split_s1, truth_positions
+from .evaluate import blocking_stats, label_pairs, print_stats, select_threshold
+from .features import FEATURE_NAMES, compute_features
 
 
 def create_model(model_type, y_train):
@@ -28,7 +21,7 @@ def create_model(model_type, y_train):
                 "The 'xgboost' package is not installed. "
                 "Install it via 'pip install xgboost' or run with '--model-type histgb'."
             )
-        
+
         device = "cpu"
         try:
             import torch
@@ -64,41 +57,91 @@ def create_model(model_type, y_train):
         raise ValueError(f"Unsupported model_type: '{model_type}'. Choose 'histgb' or 'xgboost'.")
 
 
+def sample_negatives(s_idx, y, per_s1, seed=0):
+    """Keep every positive and at most per_s1 random negatives per S1 record."""
+    order = np.lexsort((np.random.default_rng(seed).random(len(s_idx)), y, s_idx))
+    s_sorted, y_sorted = s_idx[order], y[order]
+    neg = y_sorted == 0
+    # rank of each negative within its S1 group
+    group_start = np.r_[0, np.flatnonzero(np.diff(s_sorted)) + 1]
+    first = np.repeat(group_start, np.diff(np.r_[group_start, len(s_sorted)]))
+    rank = np.arange(len(s_sorted)) - first
+    keep = ~neg | (rank < per_s1)
+    return np.sort(order[keep])
+
+
+def candidates_for(s1, positions, target, truth):
+    part = s1.iloc[positions].reset_index(drop=True)
+    ids = part["entity_id"].tolist()
+    s_idx, t_idx = generate_candidates(part, target)
+    truth_pos, n_true = truth_positions(ids, truth, target)
+    y = label_pairs(s_idx, t_idx, truth_pos)
+    return part, s_idx, t_idx, y, n_true
+
+
 def main():
-    ap = argparse.ArgumentParser(description="Train business entity resolution classifier.")
+    ap = argparse.ArgumentParser(description="Train and evaluate the entity resolution classifier.")
     ap.add_argument("--data", default="dataset/train", help="Path to training data directory")
     ap.add_argument("--model", default="model.joblib", help="Output model joblib path")
-    ap.add_argument("--model-type", choices=["histgb", "xgboost"], default="histgb", help="Classifier type: histgb or xgboost")
+    ap.add_argument("--model-type", choices=["histgb", "xgboost"], default="histgb")
+    ap.add_argument("--holdout", type=float, default=0.2, help="Fraction of S1 entities held out for evaluation")
+    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--sample-size", type=int, default=10000, help="S1 records used (train + holdout); 0 = all")
+    ap.add_argument("--neg-per-s1", type=int, default=100, help="Max negative candidates per S1 used for training")
     args = ap.parse_args()
 
-    d = Path(args.data)
-    s1 = read_tsv(d / "train_source1.tsv")
-    s2 = read_tsv(d / "train_source2.tsv")
-    s3 = read_tsv(d / "train_source3.tsv")
-    gt = parse_truth(read_tsv(d / "train_ground_truth.tsv"))
-    target = pd.concat([s2, s3], ignore_index=True)
+    started = time.perf_counter()
+    s1, target = load_split(args.data, "train")
+    truth = load_truth(args.data)
+    train_pos, hold_pos = split_s1(len(s1), args.holdout, args.seed, args.sample_size)
+    print(f"S1 train: {len(train_pos):,}  S1 holdout: {len(hold_pos):,}  targets: {len(target):,}", flush=True)
 
-    pairs = generate_candidates(s1, target)
-    target_by_id = target.set_index("entity_id")
-    s1_by_id = s1.set_index("entity_id")
-
-    X, y = [], []
-    positives = set((a, b) for a, ids in gt.items() for b in ids)
-    for a_id, b_id in pairs:
-        x = pair_features(s1_by_id.loc[a_id], target_by_id.loc[b_id])
-        X.append(x)
-        y.append(int((a_id, b_id) in positives))
-
-    X = pd.DataFrame(X).replace([np.inf, -np.inf], np.nan).fillna(0)
-    y = np.asarray(y)
-    if y.sum() == 0:
+    # ---------------- train ----------------
+    part, s_idx, t_idx, y, n_true = candidates_for(s1, train_pos, target, truth)
+    keep = sample_negatives(s_idx, y, args.neg_per_s1, args.seed)
+    X = compute_features(part, target, s_idx[keep], t_idx[keep])
+    y_train = y[keep]
+    if y_train.sum() == 0:
         raise RuntimeError("No positive training pairs were found inside the candidate set.")
+    print(f"Training on {len(X):,} pairs ({int(y_train.sum()):,} positive)", flush=True)
+    model = create_model(args.model_type, y_train)
+    model.fit(X, y_train)
+    del X
 
-    model = create_model(args.model_type, y)
-    model.fit(X, y)
-    
-    joblib.dump({"model": model, "features": list(X.columns), "model_type": args.model_type}, args.model)
-    print(json.dumps({"pairs": len(X), "positives": int(y.sum()), "model": args.model, "model_type": args.model_type}, indent=2))
+    report = {"train_blocking": blocking_stats(s_idx, y, n_true, len(target))}
+
+    # ---------------- evaluate on holdout ----------------
+    threshold = 0.5
+    if len(hold_pos):
+        part, s_idx, t_idx, y, n_true = candidates_for(s1, hold_pos, target, truth)
+        X = compute_features(part, target, s_idx, t_idx)
+        probs = model.predict_proba(X)[:, 1] if len(X) else np.empty(0)
+        threshold, f05_best, f05_crossfit = select_threshold(s_idx, probs, y, n_true, args.seed)
+        report["holdout_blocking"] = blocking_stats(s_idx, y, n_true, len(target))
+        report["holdout_f05"] = {
+            "threshold": threshold,
+            "f05_at_threshold": f05_best,
+            "f05_crossfit": f05_crossfit,
+        }
+
+    report["runtime_seconds"] = round(time.perf_counter() - started, 1)
+
+    for name, stats in report.items():
+        if isinstance(stats, dict):
+            print_stats(name, stats)
+    print(f"\nruntime_seconds: {report['runtime_seconds']}")
+
+    joblib.dump(
+        {
+            "model": model,
+            "features": FEATURE_NAMES,
+            "model_type": args.model_type,
+            "threshold": threshold,
+            "report": report,
+        },
+        args.model,
+    )
+    print(json.dumps({"model": args.model, "threshold": threshold}))
 
 
 if __name__ == "__main__":

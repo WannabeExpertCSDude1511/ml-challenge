@@ -29,9 +29,9 @@ if [ ! -d "$DATA_DIR" ]; then
     exit 1
 fi
 
-# 3. Execute blocking test on the full dataset (sample-size 0)
+# 3. Execute blocking test on all S1 records (sample-size 0)
 echo "[Step 2] Executing blocking test across full training dataset..."
-python -m src.test_blocking --data "$DATA_DIR" --sample-size 0 --show-missed 20
+python -m src.test_blocking --data "$DATA_DIR" --sample-size 0
 
 echo ""
 echo "========================================================================="

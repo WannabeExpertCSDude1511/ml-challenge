@@ -1,5 +1,6 @@
 import re
 import unicodedata
+from functools import lru_cache
 
 from indicnlp.normalize.indic_normalize import IndicNormalizerFactory
 
@@ -26,6 +27,10 @@ INDIC_SCRIPTS = [
 # =========================================================
 
 INDIC_NORMALIZER_FACTORY = IndicNormalizerFactory()
+
+
+# Bump whenever normalization output changes; it invalidates the disk cache.
+NORMALIZE_VERSION = 1
 
 
 # =========================================================
@@ -621,6 +626,7 @@ def char_ngrams(value, n=3):
 # Country normalization
 # =========================================================
 
+@lru_cache(maxsize=None)
 def normalize_country(value):
     """
     Normalize a country text field.
@@ -645,3 +651,54 @@ def jaccard(a, b):
         return 0.0
 
     return len(a & b) / len(a | b)
+
+
+# =========================================================
+# Helpers on already-normalized text
+# =========================================================
+#
+# normalize_text() output is idempotent, so these skip
+# re-normalizing and give the same result as tokens(),
+# numeric_tokens() and char_ngrams() on the raw value.
+# =========================================================
+
+def normalize_fields(name, address, country):
+    """
+    Normalize one record once.
+
+    Returns (country, name, name_core, address).
+    """
+
+    norm_name = normalize_name(name)
+
+    core = " ".join(
+        token
+        for token in norm_name.split()
+        if token not in LEGAL_SUFFIXES
+    )
+
+    return (
+        normalize_country(country),
+        norm_name,
+        core,
+        normalize_address(address),
+    )
+
+
+def trigrams(norm_text, n=3):
+    text = norm_text.replace(" ", "")
+
+    if not text:
+        return set()
+
+    if len(text) <= n:
+        return {text}
+
+    return {
+        text[i:i + n]
+        for i in range(len(text) - n + 1)
+    }
+
+
+def digits(norm_text):
+    return set(re.findall(r"\d+", norm_text))

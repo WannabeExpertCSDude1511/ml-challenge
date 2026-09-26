@@ -31,53 +31,47 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## Train
+## Normalization cache
 
-Run from the project root:
+The first run of any command normalizes every record once (in parallel) and caches the result under `cache/`. Later runs reuse it; the cache is rebuilt automatically when a source file or `NORMALIZE_VERSION` changes.
+
+## Train and evaluate
+
+`train.py` holds out 20% of S1 entities (fixed seed), trains on the rest and reports, on the holdout: macro F_0.5 (with the threshold chosen by the scan, plus an unbiased cross-fitted estimate), blocking recall, and average / 99th-percentile candidates per S1. The chosen threshold is saved with the model.
 
 ```bash
-# Default: HistGradientBoostingClassifier
-python -m src.train --data dataset/train --model model.joblib --model-type histgb
+# Evaluation run on a seeded sample of S1 (train + holdout)
+python -m src.train --data dataset/train --model model.joblib --sample-size 10000
 
-# XGBoost Classifier
-python -m src.train --data dataset/train --model model.joblib --model-type xgboost
+# All S1 records
+python -m src.train --data dataset/train --model model.joblib --sample-size 0
+
+# XGBoost instead of HistGradientBoosting
+python -m src.train --model-type xgboost
 ```
+
+The holdout is the same set of entities for every `--sample-size`; a smaller sample is a prefix of a larger one.
 
 ## Predict
 
 ```bash
-python -m src.predict --data dataset/test --model model.joblib --output output --threshold 0.80
+python -m src.predict --data dataset/test --model model.joblib --output output
 ```
 
-The threshold is intentionally exposed as a parameter. It should be selected using an entity-level validation split and the competition's macro F_0.5 metric rather than assumed to be optimal.
+Uses the same blocking and features as training. `candidate_pairs.tsv` contains exactly the pairs the model scored; `--threshold` overrides the saved one.
 
-## Test on Training Data
-
-Evaluate the model against ground truth data (evaluating candidate recall, pair precision/recall, and Macro $F_{0.5}$):
+## Test blocking alone
 
 ```bash
-python -m src.test_train --data dataset/train --model model.joblib --threshold 0.80
+python -m src.test_blocking --data dataset/train --sample-size 10000
 ```
 
-To scan multiple thresholds to find the optimal Macro $F_{0.5}$ threshold:
+Runs the same `generate_candidates()` as `train.py` / `predict.py` on the same S1 sample and reports recall and candidates per S1, overall and per country.
+
+## Normalization unit test
 
 ```bash
-python -m src.test_train --data dataset/train --model model.joblib --scan-thresholds
-```
-
-## Test Blocking Stage Alone
-
-Run heavy diagnostics and key attribution benchmarks on candidate generation & blocking:
-
-```bash
-# Convenient one-step executable script (auto-handles virtual environment)
-./run_test_blocking.sh
-
-# Or directly via Python module (sample of 10,000 entities with failure diagnostics)
-python -m src.test_blocking --data dataset/train --sample-size 10000 --show-missed 10
-
-# Direct Python run on full training dataset
-python -m src.test_blocking --data dataset/train --sample-size 0
+python -m src.test_train
 ```
 
 ## Validate submission
