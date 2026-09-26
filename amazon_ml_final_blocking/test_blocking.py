@@ -32,27 +32,27 @@ from src.blocking import (
 # =========================================================
 
 DATA_DIR = Path(
-    "dataset/train"
+    "dataset/debug"
 )
 
 S1_FILE = (
     DATA_DIR /
-    "train_source1.tsv"
+    "sample_s1.tsv"
 )
 
 S2_FILE = (
     DATA_DIR /
-    "train_source2.tsv"
+    "sample_s2.tsv"
 )
 
 S3_FILE = (
     DATA_DIR /
-    "train_source3.tsv"
+    "sample_s3.tsv"
 )
 
 GT_FILE = (
     DATA_DIR /
-    "train_ground_truth.tsv"
+    "sample_gt.tsv"
 )
 
 
