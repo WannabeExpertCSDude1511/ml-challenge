@@ -13,6 +13,8 @@ from .blocking import DEFAULT_K, BlockingIndex
 from .data import load_split, load_truth, split_s1, truth_positions
 from .evaluate import blocking_stats, label_pairs, print_stats
 
+QUERY_CHUNK = 25_000
+
 
 def main():
     ap = argparse.ArgumentParser(description="Evaluate blocking recall and candidate volume.")
@@ -34,7 +36,14 @@ def main():
     start = time.perf_counter()
     index = BlockingIndex(target)
     built = time.perf_counter()
-    s_idx, t_idx, rank = index.query(part, max(args.k), return_ranks=True)
+    # Query in chunks (as train.py / predict.py do) so memory stays flat,
+    # even for --sample-size 0 (all ~2.2M training S1 records).
+    parts = []
+    for a in range(0, len(part), QUERY_CHUNK):
+        s, t, r = index.query(part.iloc[a:a + QUERY_CHUNK].reset_index(drop=True), max(args.k), return_ranks=True)
+        parts.append((s + a, t, r))
+    s_idx, t_idx, rank = (np.concatenate(p) for p in zip(*parts))
+    del parts
     queried = time.perf_counter()
     del index
 

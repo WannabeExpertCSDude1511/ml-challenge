@@ -11,7 +11,6 @@ sleep it, depending on your lid settings, so leave it open and plugged in.
 Usage (from the project root):
     powershell -ExecutionPolicy Bypass -File run_submission.ps1
     powershell -ExecutionPolicy Bypass -File run_submission.ps1 -SampleSize 50000
-To start it detached (survives closing the terminal), see launch_submission.ps1.
 #>
 param(
     # S1 records used by train.py (80% train / 20% holdout for the threshold).

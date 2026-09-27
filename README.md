@@ -36,9 +36,8 @@ pip install -r requirements.txt
 One command (Windows PowerShell) runs train → predict → validation and logs everything under `logs/`:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File run_submission.ps1                  # in the foreground
-powershell -ExecutionPolicy Bypass -File launch_submission.ps1               # detached (scheduled task)
-Get-Content logs\submission-status.txt                                       # RUNNING <step> / DONE / FAILED <step>
+powershell -ExecutionPolicy Bypass -File run_submission.ps1
+Get-Content logs\submission-status.txt       # RUNNING <step> / DONE / FAILED <step>
 ```
 
 Or step by step (any OS):
@@ -124,5 +123,5 @@ Final model (100,000-S1 training sample, 20,000 held out): holdout macro F0.5 0.
 | `src/check_candidates.py` | Streaming check of `candidate_pairs.tsv` |
 | `src/test_train.py` | Normalization unit test |
 | `src/io.py` | TSV reading/writing helpers |
-| `run_submission.ps1`, `launch_submission.ps1` | Full submission run (foreground / detached) |
-| `run_test_blocking.sh` | Blocking evaluation on all training S1 (slow; prefer `--sample-size`) |
+| `run_submission.ps1` | Full submission run: train → predict → validation, logged |
+| `run_test_blocking.sh` | Blocking evaluation: `./run_test_blocking.sh` for all training S1 (~3 h), `./run_test_blocking.sh 10000` for a sample |
