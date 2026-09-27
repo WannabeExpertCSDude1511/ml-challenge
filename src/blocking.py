@@ -337,11 +337,13 @@ class BlockingIndex:
             blocks.append(X)
         return blocks
 
-    def query(self, s1, k=DEFAULT_K, return_ranks=False, verbose=True):
+    def query(self, s1, k=DEFAULT_K, return_ranks=False, return_details=False, verbose=True):
         """
-        Return (s_idx, t_idx[, rank]) for every S1 row: the stage-1 pool
-        re-ranked, keeping pairs whose best rank is below k. Sorted by s_idx,
-        then rank.
+        Return (s_idx, t_idx) for every S1 row: the stage-1 pool re-ranked,
+        keeping pairs whose best rank is below k. Sorted by s_idx, then rank.
+
+        return_ranks adds the rank array; return_details adds a dict with the
+        per-pair "rank", "name_sim" and "addr_sim" (re-rank similarities).
         """
         start_time = time.perf_counter()
         s_idx, t_idx, pool_rank = self._pool(s1, max(k, POOL_K))
@@ -353,17 +355,19 @@ class BlockingIndex:
             _ranks(s_idx, addr_sim + CROSS_WEIGHT * name_sim, pool_rank),
             pool_rank,
         ])
-        del name_sim, addr_sim, pool_rank
+        del pool_rank
         _free_workers()
 
         keep = rank < k
-        s_idx, t_idx, rank = s_idx[keep], t_idx[keep], rank[keep]
-        order = np.lexsort((rank, s_idx))
-        s_idx, t_idx, rank = s_idx[order], t_idx[order], rank[order]
+        order = np.lexsort((rank[keep], s_idx[keep]))
+        s_idx, t_idx, rank = s_idx[keep][order], t_idx[keep][order], rank[keep][order]
+        name_sim, addr_sim = name_sim[keep][order], addr_sim[keep][order]
 
         if verbose:
             print(f"Blocking: {len(s_idx):,} candidate pairs for {len(s1):,} S1 records "
                   f"(k={k}, pool {max(k, POOL_K)}) in {time.perf_counter() - start_time:.0f}s", flush=True)
+        if return_details:
+            return s_idx, t_idx, {"rank": rank, "name_sim": name_sim, "addr_sim": addr_sim}
         return (s_idx, t_idx, rank) if return_ranks else (s_idx, t_idx)
 
     def _pool(self, s1, k):

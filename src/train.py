@@ -70,13 +70,26 @@ def sample_negatives(s_idx, y, per_s1, seed=0):
     return np.sort(order[keep])
 
 
+QUERY_CHUNK = 25_000
+
+
 def candidates_for(s1, positions, target, truth, index, k):
     part = s1.iloc[positions].reset_index(drop=True)
     ids = part["entity_id"].tolist()
-    s_idx, t_idx = index.query(part, k)
+    # Query in chunks so blocking memory stays flat for large samples.
+    s_parts, t_parts, detail_parts = [], [], []
+    for start in range(0, len(part), QUERY_CHUNK):
+        s, t, details = index.query(part.iloc[start:start + QUERY_CHUNK].reset_index(drop=True), k,
+                                    return_details=True)
+        s_parts.append(s + start)
+        t_parts.append(t)
+        detail_parts.append(details)
+    s_idx = np.concatenate(s_parts)
+    t_idx = np.concatenate(t_parts)
+    details = {key: np.concatenate([d[key] for d in detail_parts]) for key in detail_parts[0]}
     truth_pos, n_true = truth_positions(ids, truth, target)
     y = label_pairs(s_idx, t_idx, truth_pos)
-    return part, s_idx, t_idx, y, n_true
+    return part, s_idx, t_idx, details, y, n_true
 
 
 def main():
@@ -100,9 +113,13 @@ def main():
     index = BlockingIndex(target)
 
     # ---------------- train ----------------
-    part, s_idx, t_idx, y, n_true = candidates_for(s1, train_pos, target, truth, index, args.k)
+    part, s_idx, t_idx, details, y, n_true = candidates_for(s1, train_pos, target, truth, index, args.k)
+    # Features on the full candidate sets (group features compare a candidate
+    # with all of its S1 record's candidates), then sample negatives.
     keep = sample_negatives(s_idx, y, args.neg_per_s1, args.seed)
-    X = compute_features(part, target, s_idx[keep], t_idx[keep])
+    X = compute_features(part, target, s_idx, t_idx, details)
+    if len(keep) < len(X):
+        X = X[keep]
     y_train = y[keep]
     if y_train.sum() == 0:
         raise RuntimeError("No positive training pairs were found inside the candidate set.")
@@ -112,13 +129,13 @@ def main():
     del X
 
     report = {"train_blocking": blocking_stats(s_idx, y, n_true, len(target))}
-    del part, s_idx, t_idx, y, keep, y_train
+    del part, s_idx, t_idx, details, y, keep, y_train
 
     # ---------------- evaluate on holdout ----------------
     threshold = 0.5
     if len(hold_pos):
-        part, s_idx, t_idx, y, n_true = candidates_for(s1, hold_pos, target, truth, index, args.k)
-        X = compute_features(part, target, s_idx, t_idx)
+        part, s_idx, t_idx, details, y, n_true = candidates_for(s1, hold_pos, target, truth, index, args.k)
+        X = compute_features(part, target, s_idx, t_idx, details)
         probs = model.predict_proba(X)[:, 1] if len(X) else np.empty(0)
         del X
         threshold, f05_best, f05_crossfit = select_threshold(s_idx, probs, y, n_true, args.seed)

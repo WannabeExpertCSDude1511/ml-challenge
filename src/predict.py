@@ -40,8 +40,8 @@ def main():
 
         for start in range(0, len(s1), args.s1_chunk):
             part = s1.iloc[start:start + args.s1_chunk].reset_index(drop=True)
-            s_idx, t_idx = index.query(part, k)
-            X = compute_features(part, target, s_idx, t_idx)
+            s_idx, t_idx, details = index.query(part, k, return_details=True)
+            X = compute_features(part, target, s_idx, t_idx, details)
             probs = model.predict_proba(X)[:, 1] if len(X) else np.empty(0)
 
             # candidate_pairs.tsv is exactly the set of pairs the model scored;

@@ -77,7 +77,7 @@ def macro_f05_arrays(keep, s_idx, y, n_true):
     return float(f.mean()) if n else 0.0
 
 
-THRESHOLDS = np.round(np.arange(0.05, 1.0, 0.05), 2)
+THRESHOLDS = np.round(np.arange(0.02, 0.99, 0.02), 2)
 
 
 def select_threshold(s_idx, probs, y, n_true, seed=0):
