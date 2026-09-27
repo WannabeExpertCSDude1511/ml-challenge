@@ -1,8 +1,12 @@
-pandas
-numpy
-scikit-learn
-rapidfuzz
-joblib
-xgboost
-indic-nlp-library
-indic-transliteration
+# Pinned to the versions the pipeline was developed and run with (Python 3.12, Windows 11).
+pandas==2.2.3
+numpy==2.1.3
+scipy==1.17.0
+pyarrow==23.0.1
+scikit-learn==1.5.2
+rapidfuzz==3.10.1
+joblib==1.4.2
+indic-nlp-library==0.92
+indic-transliteration==2.3.82
+# Optional: only for `train.py --model-type xgboost` (Apache-2.0).
+xgboost==3.1.0
