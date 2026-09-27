@@ -99,6 +99,8 @@ Macro F0.5 over all holdout S1 entities, including singletons and true matches l
 | + relative, blocking and address-number features (10,000 S1) | 0.942 | 0.941 | 96.5% | 58 |
 | **Final model (100,000 S1; 20,000 held out)** | **0.942** | **0.942** | **96.7%** | **57.8** |
 
+**Public leaderboard (test set): macro F0.5 = 0.924**, close to the holdout estimate. The holdout is drawn from the training data (US and India only), while the test set adds France.
+
 Everything runs on a 16 GB laptop with 6 worker processes:
 - Training on 100,000 S1 records took 12 minutes.
 - Prediction on the full test set took 3 h 41 min.
