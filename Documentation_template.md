@@ -14,7 +14,7 @@ The pipeline:
 
 `candidate_pairs.tsv` is exactly the set of pairs the classifier scores, so every predicted match is also a candidate.
 
-All development used a fixed protocol: 20% of S1 entities held out (fixed seed), models trained on a seeded sample of the remaining 80%. Each change was measured by holdout macro F0.5, blocking recall, and candidates per S1 record.
+Evaluation protocol: 20% of training S1 entities are held out (fixed seed) and the model is trained on a seeded sample of the remaining 80%. Performance is reported as holdout macro F0.5, blocking recall, and candidates per S1 record.
 
 ## Candidate generation / blocking strategy
 
@@ -65,8 +65,6 @@ Training sample (10,000 S1 against all 10.3M training targets):
 
 Test set (`candidate_pairs.tsv`): 1,732,544 S1 records; 57.4 candidates per S1 on average (median 58, 99th percentile 73, max 80); 99.5M pairs in total.
 
-The initial exact-key blocking reached 98.0% recall with ~505,000 candidates per S1. The new blocking uses about 10,000× fewer candidates for ~1.5 points of recall.
-
 **Scalability.** The target index (~10M records) is built once in two streaming passes (~5 min) and memory-mapped. Queries run in bounded-memory chunks; cost grows linearly with S1 and never compares against all targets.
 
 ## Model architecture and feature engineering
@@ -84,7 +82,7 @@ The initial exact-key blocking reached 98.0% recall with ~505,000 candidates per
 | Blocking | blocking rank, re-rank name and address similarity, their sum |
 | Relative to the S1 record's other candidates | gap to the best name, address and combined similarity; rank by combined similarity; number of candidates |
 
-The relative and blocking features tell the model whether a candidate stands out among its competitors, which matters for precision under F0.5. They raised holdout F0.5 from 0.932 to 0.942.
+The relative and blocking features tell the model whether a candidate stands out among its competitors, which matters for precision under F0.5 (without them, holdout F0.5 is 0.932 instead of 0.942).
 
 **Decision rule:** a pair is a match if its probability is at least the threshold. The threshold is chosen on the holdout by scanning 0.02–0.98 for the best macro F0.5 (**0.70**).
 
@@ -92,12 +90,12 @@ The relative and blocking features tell the model whether a candidate stands out
 
 Macro F0.5 over all holdout S1 entities, including singletons and true matches lost by blocking. "Cross-fitted" means the threshold is tuned on one half of the holdout and scored on the other, so the number is not inflated by tuning.
 
-| Version | Holdout F0.5 | Cross-fitted F0.5 | Blocking recall | Avg candidates / S1 |
-|---|---|---|---|---|
-| Initial pipeline (200-S1 sample) | 0.488 | 0.488 | 98.0% | ~505,000 |
-| Two-stage top-K blocking (10,000 S1) | 0.932 | 0.929 | 96.5% | 58 |
-| + relative, blocking and address-number features (10,000 S1) | 0.942 | 0.941 | 96.5% | 58 |
-| **Final model (100,000 S1; 20,000 held out)** | **0.942** | **0.942** | **96.7%** | **57.8** |
+| Metric (100,000 S1 sampled; 80,000 train / 20,000 held out) | Value |
+|---|---|
+| Holdout macro F0.5 | **0.942** |
+| Cross-fitted macro F0.5 | **0.942** |
+| Blocking recall | **96.7%** |
+| Avg candidates per S1 | **57.8** |
 
 **Public leaderboard (test set): macro F0.5 = 0.924**, close to the holdout estimate. The holdout is drawn from the training data (US and India only), while the test set adds France.
 
@@ -106,6 +104,20 @@ Everything runs on a 16 GB laptop with 6 worker processes:
 - Prediction on the full test set took 3 h 41 min.
 
 Outputs pass the official `validate_submission.py`, and `candidate_pairs.tsv` passes a streaming checker with the same rules (`src/check_candidates.py`). `README.md` and `run_submission.ps1` reproduce the submission end to end.
+
+## Design decisions and trade-offs
+
+- **K = 20 rather than 50.** K = 50 adds 0.6 points of recall but 2.5× more candidates per S1. Under F0.5 the extra near-miss candidates add more false-merge risk than the recall is worth (a 96.5% recall ceiling caps macro F0.5 at ≈0.99, far above the achieved score), and smaller candidate sets are preferred.
+- **Separate name-led and address-led pools.** A single combined score buries candidates that are strong on one field and weak on the other (e.g. a different trading name at the same address); the union of both rankings recovers them.
+- **Dropping very frequent features (> 5,000 targets).** Tokens such as `ltd`, `pvt` or house number `12` carry almost no identifying weight but dominate the cost of the sparse products; removing them keeps blocking fast and the candidate count bounded.
+- **Training sample size.** Training on 10,000 vs 100,000 S1 records gives 0.941 vs 0.942 cross-fitted F0.5, so the model has plateaued; training on all ~2.2M training S1 records is unnecessary.
+- **Model size.** A larger gradient-boosting configuration improved holdout F0.5 by only +0.0016 (within noise) while making training and prediction 2–3× slower, so the smaller model is used.
+
+## Limitations and future work
+
+- **Remaining blocking misses** (≈3.3% of true matches) are mostly heavily corrupted names with an empty address competing with many similarly named businesses (e.g. `imperial bros` vs `imperial brorhegcs`). More typo-tolerant name keys could recover some of these without enlarging K.
+- **Approximate transliteration** of some Indian-script names (e.g. Tamil) is tolerated by character 3-gram similarity but not exact.
+- **France** is absent from the training data; it is handled by the same country-agnostic pipeline and its prediction statistics match the other countries, but its accuracy cannot be measured locally.
 
 ## External data / fair play
 
